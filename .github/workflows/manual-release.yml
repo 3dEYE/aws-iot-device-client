@@ -1,0 +1,151 @@
+name: Manual Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_branch:
+        description: Branch to build from and target for the release
+        required: true
+        default: dev
+      dry_run:
+        description: Build binaries without creating a GitHub release
+        required: true
+        default: "true"
+        type: choice
+        options:
+          - "true"
+          - "false"
+
+permissions:
+  contents: write
+
+env:
+  PACKAGE_NAME: aws-iot-device-client
+  ECR_BASE_REPO: aws-iot-device-client/aws-iot-device-client-base-images
+
+jobs:
+  version:
+    name: Read release version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Checkout release branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.release_branch }}
+          fetch-depth: 0
+
+      - name: Read version from .version
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ ! -s .version ]]; then
+            echo ".version is missing or empty" >&2
+            exit 1
+          fi
+
+          version=$(cut -d'*' -f1 .version | tr -d '[:space:]')
+          if [[ -z "$version" ]]; then
+            echo "Unable to read release version from .version" >&2
+            exit 1
+          fi
+
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: Build ${{ matrix.architecture }} binary
+    runs-on: ubuntu-latest
+    needs: version
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - architecture: x64
+            docker_image: x86_64-ubuntu-latest
+            build_args: ""
+            binary_path: build/aws-iot-device-client
+            asset_name: aws-iot-device-client-linux-x64
+          - architecture: arm32
+            docker_image: x86_64-ubuntu-latest
+            build_args: --compile-mode=armhf_cross_mode
+            binary_path: build/aws-iot-device-client
+            asset_name: aws-iot-device-client-linux-arm32
+          - architecture: arm64
+            docker_image: x86_64-ubuntu-latest
+            build_args: --compile-mode=aarch64_cross_mode
+            binary_path: build/aws-iot-device-client
+            asset_name: aws-iot-device-client-linux-arm64
+    steps:
+      - name: Checkout release branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.release_branch }}
+          fetch-depth: 0
+
+      - name: Build binary
+        env:
+          RELEASE_BRANCH: ${{ inputs.release_branch }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          docker_image="public.ecr.aws/${ECR_BASE_REPO}:${{ matrix.docker_image }}"
+          docker pull "$docker_image"
+          docker run \
+            --mount "type=bind,source=$(pwd),target=/root/${PACKAGE_NAME}" \
+            --env GITHUB_REF=refs/heads/${RELEASE_BRANCH} \
+            "$docker_image" \
+            ${{ matrix.build_args }}
+
+      - name: Stage release asset
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p release-assets
+          install -m 0755 "${{ matrix.binary_path }}" "release-assets/${{ matrix.asset_name }}"
+
+      - name: Upload release asset artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset_name }}
+          path: release-assets/${{ matrix.asset_name }}
+          if-no-files-found: error
+
+  release:
+    name: Create GitHub release
+    runs-on: ubuntu-latest
+    if: ${{ inputs.dry_run == 'false' }}
+    needs:
+      - version
+      - build
+    steps:
+      - name: Checkout release branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.release_branch }}
+          fetch-depth: 0
+
+      - name: Download release assets
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
+
+      - name: Create release and attach binaries
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_BRANCH: ${{ inputs.release_branch }}
+          VERSION: ${{ needs.version.outputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          gh release create "$VERSION" \
+            release-assets/* \
+            --target "$RELEASE_BRANCH" \
+            --title "$VERSION" \
+            --notes "Release built from the ${RELEASE_BRANCH} branch."
