@@ -1105,6 +1105,37 @@ TEST_F(TestJobsFeature, SubscriptionRecoveryCallbacksAfterStopAreIgnored)
     callbacks.updateJobRejected(0);
 }
 
+TEST_F(TestJobsFeature, StartNextResponseAfterStopNotifiesOnce)
+{
+    expectSuccessfulJobsStartup(*jobsMock, mockClient, ThingName);
+    jobsMock->init(std::shared_ptr<Mqtt::MqttConnection>(), notifier, config);
+    jobsMock->invokeRunJobs();
+    Mock::VerifyAndClearExpectations(mockClient.get());
+
+    JobsRecoveryCallbacks callbacks;
+    expectJobsRecoverySubscriptions(mockClient, ThingName, callbacks);
+    jobsMock->onConnectionResumed(false);
+    Mock::VerifyAndClearExpectations(mockClient.get());
+
+    EXPECT_CALL(*notifier, onEvent(jobsMock.get(), ClientBaseEventNotification::FEATURE_STOPPED)).Times(1);
+    jobsMock->stop();
+
+    JobExecutionData job = getSampleJobExecution("job1", 1);
+    job.Status = Aws::Crt::Optional<JobStatus>(JobStatus::QUEUED);
+    startNextJobExecutionResponse->Execution = Aws::Crt::Optional<JobExecutionData>(job);
+
+    EXPECT_CALL(
+        *notifier,
+        onError(
+            jobsMock.get(),
+            ClientBaseErrorNotification::MESSAGE_RECEIVED_AFTER_SHUTDOWN,
+            "Incoming QUEUED job: job1"))
+        .Times(1);
+
+    ASSERT_TRUE(callbacks.startNextAcceptedResponse);
+    callbacks.startNextAcceptedResponse(startNextJobExecutionResponse.get(), 0);
+}
+
 TEST_F(TestJobsFeature, StopWaitsForSubscriptionRecoveryToFinishQueueing)
 {
     expectSuccessfulJobsStartup(*jobsMock, mockClient, ThingName);

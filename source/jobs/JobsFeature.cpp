@@ -484,9 +484,6 @@ void JobsFeature::startNextPendingJobReceivedHandler(StartNextJobExecutionRespon
             jobMessage << "Incoming " << Iotjobs::JobStatusMarshaller::ToString(response->Execution->Status.value())
                        << " job: " << response->Execution->JobId->c_str();
             baseNotifier->onError(this, ClientBaseErrorNotification::MESSAGE_RECEIVED_AFTER_SHUTDOWN, jobMessage.str());
-            jobMessage << "Incoming " << Iotjobs::JobStatusMarshaller::ToString(response->Execution->Status.value())
-                       << " job: " << response->Execution->JobId->c_str();
-            baseNotifier->onError(this, ClientBaseErrorNotification::MESSAGE_RECEIVED_AFTER_SHUTDOWN, jobMessage.str());
             return;
         }
         bool jobsSubscriptionsReady;
