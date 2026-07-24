@@ -214,6 +214,13 @@ TEST_F(TestSecureTunnelingFeature, PresentSessionRecoversInitialSubscriptionQueu
         .Times(2)
         .WillOnce(Return(false))
         .WillOnce(DoAll(SaveArg<3>(&recoverySubAck), Return(true)));
+    EXPECT_CALL(
+        *notifier,
+        onError(
+            secureTunnelingFeature.get(),
+            ClientBaseErrorNotification::SUBSCRIPTION_FAILED,
+            AllOf(HasSubstr("Failed to queue"), HasSubstr("tunnel notification"))))
+        .Times(1);
     EXPECT_CALL(*notifier, onEvent(secureTunnelingFeature.get(), ClientBaseEventNotification::FEATURE_STARTED))
         .Times(1);
 

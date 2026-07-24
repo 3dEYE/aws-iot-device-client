@@ -5,6 +5,7 @@
 #include "logging/LoggerFactory.h"
 
 #include <exception>
+#include <utility>
 #include <vector>
 
 using namespace std;
@@ -89,7 +90,7 @@ void FeatureRegistry::startAll() const
 
 void FeatureRegistry::onConnectionResumed(bool sessionPresent) const
 {
-    std::vector<std::shared_ptr<Feature>> activeFeatures;
+    std::vector<std::pair<std::string, std::shared_ptr<Feature>>> activeFeatures;
     {
         std::lock_guard<std::mutex> lock(featuresLock);
         activeFeatures.reserve(features.size());
@@ -97,7 +98,7 @@ void FeatureRegistry::onConnectionResumed(bool sessionPresent) const
         {
             if (feature.second != nullptr)
             {
-                activeFeatures.push_back(feature.second);
+                activeFeatures.emplace_back(feature.first, feature.second);
             }
         }
     }
@@ -106,20 +107,20 @@ void FeatureRegistry::onConnectionResumed(bool sessionPresent) const
     {
         try
         {
-            feature->onConnectionResumed(sessionPresent);
+            feature.second->onConnectionResumed(sessionPresent);
         }
         catch (const std::exception &exception)
         {
             LOGM_ERROR(
                 TAG,
                 "Feature %s failed while handling resumed MQTT connection: %s",
-                feature->getName().c_str(),
+                feature.first.c_str(),
                 exception.what());
         }
         catch (...)
         {
             LOGM_ERROR(
-                TAG, "Feature %s failed while handling resumed MQTT connection", feature->getName().c_str());
+                TAG, "Feature %s failed while handling resumed MQTT connection", feature.first.c_str());
         }
     }
 }

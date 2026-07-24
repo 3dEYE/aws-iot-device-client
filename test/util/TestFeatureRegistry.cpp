@@ -15,8 +15,15 @@ using namespace Aws::Iot::DeviceClient::Util;
 class FakeFeature : public Feature
 {
   public:
-    FakeFeature(const std::string &name, bool throwOnConnectionResumed = false)
-        : name(name), started(false), stopped(false), throwOnConnectionResumed(throwOnConnectionResumed)
+    FakeFeature(
+        const std::string &name,
+        bool throwOnConnectionResumed = false,
+        bool throwOnGetName = false)
+        : name(name),
+          started(false),
+          stopped(false),
+          throwOnConnectionResumed(throwOnConnectionResumed),
+          throwOnGetName(throwOnGetName)
     {
     }
     int start() override
@@ -40,7 +47,14 @@ class FakeFeature : public Feature
         ++connectionResumedCount;
         lastSessionPresent = sessionPresent;
     }
-    std::string getName() { return name; }
+    std::string getName() override
+    {
+        if (throwOnGetName)
+        {
+            throw std::runtime_error("feature name failure");
+        }
+        return name;
+    }
     bool isStarted() { return started; }
     bool isStopped() { return stopped; }
     int getConnectionResumedCount() { return connectionResumedCount; }
@@ -53,6 +67,7 @@ class FakeFeature : public Feature
     int connectionResumedCount{0};
     bool lastSessionPresent{false};
     bool throwOnConnectionResumed{false};
+    bool throwOnGetName{false};
 };
 
 class TestFeatureRegistry : public ::testing::Test
@@ -194,6 +209,18 @@ TEST_F(TestFeatureRegistry, ConnectionResumedContinuesAfterFeatureThrows)
     features->add(feature1->getName(), feature1);
 
     features->onConnectionResumed(true);
+
+    ASSERT_EQ(1, feature1->getConnectionResumedCount());
+    ASSERT_TRUE(feature1->wasSessionPresent());
+}
+
+TEST_F(TestFeatureRegistry, ConnectionResumedContinuesWhenThrowingFeatureNameIsUnavailable)
+{
+    auto throwingFeature = make_shared<FakeFeature>("a-throwing-feature", true, true);
+    features->add("a-throwing-feature", throwingFeature);
+    features->add(feature1->getName(), feature1);
+
+    EXPECT_NO_THROW(features->onConnectionResumed(true));
 
     ASSERT_EQ(1, feature1->getConnectionResumedCount());
     ASSERT_TRUE(feature1->wasSessionPresent());
