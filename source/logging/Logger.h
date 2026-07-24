@@ -213,6 +213,33 @@ namespace Aws
                     }
 
                     /**
+                     * \brief Log the message at the TRACE level. If the current logging level is less than TRACE,
+                     * then this is a NOOP.
+                     *
+                     * @tparam Args variadic number of arguments that may be passed in for formatting against the log
+                     * message
+                     * @param tag a tag indicating where in the source code the log message is coming from
+                     * @param t a timestamp representing the time this message was created
+                     * @param message the log message (The message string must be NULL terminated)
+                     * @param args variadic number of arguments that may be passed in for formatting against the log
+                     * message
+                     */
+                    void trace(
+                        const char *tag,
+                        std::chrono::time_point<std::chrono::system_clock> t,
+                        const char *message,
+                        ...)
+                    {
+                        va_list args;
+                        va_start(args, message);
+                        if (logLevel >= (int)LogLevel::TRACE)
+                        {
+                            vlog(LogLevel::TRACE, tag, t, message, args);
+                        }
+                        va_end(args);
+                    }
+
+                    /**
                      * \brief Starts the underlying logger implementation's logging behavior
                      *
                      * @param config the config data passed in from the CLI and JSON

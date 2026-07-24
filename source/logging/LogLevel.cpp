@@ -33,6 +33,10 @@ namespace Aws
                             {
                                 return "[DEBUG]";
                             }
+                            case LogLevel::TRACE:
+                            {
+                                return "[TRACE]";
+                            }
                             default:
                             {
                                 return "";

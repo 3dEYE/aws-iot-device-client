@@ -514,7 +514,11 @@ int PlainConfig::LogConfig::ParseDeviceClientLogLevel(const string &level) const
     string temp = level;
     std::transform(temp.begin(), temp.end(), temp.begin(), [](unsigned char c) { return std::toupper(c); });
 
-    if ("DEBUG" == temp)
+    if ("TRACE" == temp)
+    {
+        return (int)Aws::Iot::DeviceClient::Logging::LogLevel::TRACE;
+    }
+    else if ("DEBUG" == temp)
     {
         return (int)Aws::Iot::DeviceClient::Logging::LogLevel::DEBUG;
     }
@@ -609,6 +613,8 @@ string PlainConfig::LogConfig::StringifyDeviceClientLogLevel(int level) const
             return "INFO";
         case DeviceClient::Logging::LogLevel::DEBUG:
             return "DEBUG";
+        case DeviceClient::Logging::LogLevel::TRACE:
+            return "TRACE";
     }
     throw std::invalid_argument(FormatMessage("Provided log level, %d is not known", level));
 }

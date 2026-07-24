@@ -153,7 +153,7 @@ namespace Aws
 
                 void SecureTunnelingContext::OnSendDataComplete(int errorCode) const
                 {
-                    LOG_DEBUG(TAG, "SecureTunnelingContext::OnSendDataComplete");
+                    LOG_TRACE(TAG, "SecureTunnelingContext::OnSendDataComplete");
                     if (errorCode)
                     {
                         LOGM_ERROR(TAG, "SecureTunnelingContext::OnSendDataComplete errorCode=%d", errorCode);
@@ -162,7 +162,7 @@ namespace Aws
 
                 void SecureTunnelingContext::OnDataReceive(const Crt::ByteBuf &data) const
                 {
-                    LOGM_DEBUG(TAG, "SecureTunnelingContext::OnDataReceive data.len=%zu", data.len);
+                    LOGM_TRACE(TAG, "SecureTunnelingContext::OnDataReceive data.len=%zu", data.len);
                     mTcpForward->SendData(aws_byte_cursor_from_buf(&data));
                 }
 
@@ -186,7 +186,7 @@ namespace Aws
 
                 void SecureTunnelingContext::OnTcpForwardDataReceive(const Crt::ByteBuf &data) const
                 {
-                    LOGM_DEBUG(TAG, "SecureTunnelingContext::OnTcpForwardDataReceive data.len=%zu", data.len);
+                    LOGM_TRACE(TAG, "SecureTunnelingContext::OnTcpForwardDataReceive data.len=%zu", data.len);
                     mSecureTunnel->SendData(aws_byte_cursor_from_buf(&data));
                 }
 

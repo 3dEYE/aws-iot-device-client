@@ -21,6 +21,14 @@
 #define LOG_DEBUG(tag, message)                                                                                        \
     LoggerFactory::getLoggerInstance().get()->debug(tag, std::chrono::system_clock::now(), message)
 /**
+ * \brief Log TRACE message
+ *
+ * @param tag the tag to be attached with the log message (The tag string must be NULL terminated)
+ * @param message the trace message to be logged (The message string must be NULL terminated)
+ */
+#define LOG_TRACE(tag, message)                                                                                        \
+    LoggerFactory::getLoggerInstance().get()->trace(tag, std::chrono::system_clock::now(), message)
+/**
  * \brief Log WARN message
  *
  * @param tag the tag to be attached with the log message (The tag string must be NULL terminated)
@@ -55,6 +63,15 @@
  */
 #define LOGM_DEBUG(tag, message, ...)                                                                                  \
     LoggerFactory::getLoggerInstance().get()->debug(tag, std::chrono::system_clock::now(), message, __VA_ARGS__)
+/**
+ * \brief Log TRACE message
+ *
+ * @param tag the tag to be attached with the log message (The tag string must be NULL terminated)
+ * @param message the trace message to be logged (The message string must be NULL terminated)
+ * @param ... additional arguments used in the format string
+ */
+#define LOGM_TRACE(tag, message, ...)                                                                                  \
+    LoggerFactory::getLoggerInstance().get()->trace(tag, std::chrono::system_clock::now(), message, __VA_ARGS__)
 /**
  * \brief Log WARN message
  *
