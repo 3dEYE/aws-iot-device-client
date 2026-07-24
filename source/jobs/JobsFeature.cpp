@@ -59,11 +59,9 @@ void JobsFeature::ackSubscribeToNextJobChanged(int ioError)
     LOGM_DEBUG(TAG, "Ack received for SubscribeToNextJobChanged with code {%d}", ioError);
     if (ioError)
     {
-        // TODO We need to implement a strategy for what do when our subscription fails
         string errorMessage =
             FormatMessage("Encountered ioError {%d} while attempting to subscribe to NextJobChanged", ioError);
         LOG_ERROR(TAG, errorMessage.c_str());
-        baseNotifier->onError(this, ClientBaseErrorNotification::SUBSCRIPTION_FAILED, errorMessage);
     }
     nextJobChangedResult.complete(ioError);
 }
@@ -73,10 +71,8 @@ void JobsFeature::ackSubscribeToStartNextJobAccepted(int ioError)
     LOGM_DEBUG(TAG, "Ack received for SubscribeToStartNextJobAccepted with code {%d}", ioError);
     if (ioError)
     {
-        // TODO We need to implement a strategy for what do when our subscription fails
         string errorMessage = "Encountered an ioError while attempting to subscribe to StartNextJobAccepted";
         LOG_ERROR(TAG, errorMessage.c_str());
-        baseNotifier->onError(this, ClientBaseErrorNotification::SUBSCRIPTION_FAILED, errorMessage);
     }
     startNextAcceptedResult.complete(ioError);
 }
@@ -86,10 +82,8 @@ void JobsFeature::ackSubscribeToStartNextJobRejected(int ioError)
     LOGM_DEBUG(TAG, "Ack received for SubscribeToStartNextJobRejected with code {%d}", ioError);
     if (ioError)
     {
-        // TODO We need to implement a strategy for what do when our subscription fails
         string errorMessage = "Encountered an ioError while attempting to subscribe to StartNextJobRejected";
         LOG_ERROR(TAG, errorMessage.c_str());
-        baseNotifier->onError(this, ClientBaseErrorNotification::SUBSCRIPTION_FAILED, errorMessage);
     }
     startNextRejectedResult.complete(ioError);
 }
@@ -104,10 +98,8 @@ void JobsFeature::ackSubscribeToUpdateJobExecutionAccepted(int ioError)
     LOGM_DEBUG(TAG, "Ack received for SubscribeToUpdateJobExecutionAccepted with code {%d}", ioError);
     if (ioError)
     {
-        // TODO We need to implement a strategy for what do when our subscription fails
         string errorMessage = "Encountered an ioError while attempting to subscribe to UpdateJobExecutionAccepted";
         LOG_ERROR(TAG, errorMessage.c_str());
-        baseNotifier->onError(this, ClientBaseErrorNotification::SUBSCRIPTION_FAILED, errorMessage);
     }
     updateAcceptedResult.complete(ioError);
 }
@@ -117,10 +109,8 @@ void JobsFeature::ackSubscribeToUpdateJobExecutionRejected(int ioError)
     LOGM_DEBUG(TAG, "Ack received for SubscribeToUpdateJobExecutionRejected with code {%d}", ioError);
     if (ioError)
     {
-        // TODO We need to implement a strategy for what do when our subscription fails
         string errorMessage = "Encountered an ioError while attempting to subscribe to UpdateJobExecutionRejected";
         LOG_ERROR(TAG, errorMessage.c_str());
-        baseNotifier->onError(this, ClientBaseErrorNotification::SUBSCRIPTION_FAILED, errorMessage);
     }
     updateRejectedResult.complete(ioError);
 }
@@ -130,7 +120,6 @@ void JobsFeature::reportSubscriptionQueueFailure(const char *subscriptionName)
     string errorMessage =
         FormatMessage("Failed to queue the %s subscription during AWS IoT Jobs startup", subscriptionName);
     LOG_ERROR(TAG, errorMessage.c_str());
-    baseNotifier->onError(this, ClientBaseErrorNotification::SUBSCRIPTION_FAILED, errorMessage);
 }
 
 /** Publishes a request to start the next pending job. In order to receive the response message,
@@ -359,7 +348,6 @@ void JobsFeature::completeRecoverySubscription(
     if (!errorMessage.empty())
     {
         LOG_ERROR(TAG, errorMessage.c_str());
-        baseNotifier->onError(this, ClientBaseErrorNotification::SUBSCRIPTION_FAILED, errorMessage);
     }
 
     if (retryRecovery)
@@ -1007,7 +995,6 @@ void JobsFeature::runJobs()
                         "startup",
                         subscriptionName);
                     LOG_ERROR(TAG, errorMessage.c_str());
-                    baseNotifier->onError(this, ClientBaseErrorNotification::SUBSCRIPTION_FAILED, errorMessage);
                     return false;
                 }
                 return subscriptionResult.get() == 0;

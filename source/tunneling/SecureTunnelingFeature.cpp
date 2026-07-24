@@ -229,13 +229,7 @@ namespace Aws
                             iotSecureTunnelingClient = move(client);
                             subscriptionGeneration = mConnectionRecoveryGeneration;
                         }
-                        if (!SubscribeToTunnelNotifications(false, subscriptionGeneration))
-                        {
-                            string errorMessage =
-                                "Failed to queue the tunnel notification subscription during Secure Tunneling startup";
-                            mClientBaseNotifier->onError(
-                                this, ClientBaseErrorNotification::SUBSCRIPTION_FAILED, errorMessage);
-                        }
+                        SubscribeToTunnelNotifications(false, subscriptionGeneration);
                     }
                     else
                     {

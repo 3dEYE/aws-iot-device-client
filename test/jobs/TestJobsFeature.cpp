@@ -678,13 +678,7 @@ TEST_F(TestJobsFeature, StartupQueueFailureRecoversSubscriptionsBeforePolling)
         .Times(2)
         .WillOnce(InvokeSubAck(0))
         .WillOnce(DoAll(SaveArg<3>(&callbacks.updateJobRejected), Return(true)));
-    EXPECT_CALL(
-        *notifier,
-        onError(
-            jobsMock.get(),
-            ClientBaseErrorNotification::SUBSCRIPTION_FAILED,
-            AllOf(HasSubstr("Failed to queue"), HasSubstr("StartNextPendingJobExecution accepted"))))
-        .Times(1);
+    EXPECT_CALL(*notifier, onError(_, _, _)).Times(0);
 
     int publishCount = 0;
     EXPECT_CALL(
@@ -781,26 +775,7 @@ static void verifyStartupSubAckFailureRecovery(
         .WillOnce(InvokeSubAck(0))
         .WillOnce(DoAll(SaveArg<3>(&callbacks.updateJobRejected), Return(true)));
 
-    const char *failedSubscription = "";
-    switch (failedStartupSubscription)
-    {
-        case StartupSubscription::START_NEXT_ACCEPTED:
-            failedSubscription = "StartNextJobAccepted";
-            break;
-        case StartupSubscription::START_NEXT_REJECTED:
-            failedSubscription = "StartNextJobRejected";
-            break;
-        case StartupSubscription::NEXT_JOB_CHANGED:
-            failedSubscription = "NextJobChanged";
-            break;
-    }
-    EXPECT_CALL(
-        *notifier,
-        onError(
-            &jobsFeature,
-            ClientBaseErrorNotification::SUBSCRIPTION_FAILED,
-            HasSubstr(failedSubscription)))
-        .Times(1);
+    EXPECT_CALL(*notifier, onError(_, _, _)).Times(0);
 
     atomic<int> publishCount{0};
     EXPECT_CALL(
@@ -1054,15 +1029,7 @@ TEST_F(TestJobsFeature, ConnectionResumedAfterSessionLossRetriesWhenSubscription
 
     JobsRecoveryCallbacks callbacks;
     expectJobsRecoverySubscriptions(mockClient, ThingName, callbacks, false);
-    EXPECT_CALL(
-        *notifier,
-        onError(
-            jobsMock.get(),
-            ClientBaseErrorNotification::SUBSCRIPTION_FAILED,
-            AllOf(
-                HasSubstr("Failed to queue"),
-                HasSubstr("StartNextPendingJobExecution accepted"))))
-        .Times(1);
+    EXPECT_CALL(*notifier, onError(_, _, _)).Times(0);
     EXPECT_CALL(*mockClient, PublishStartNextPendingJobExecution(_, _, _)).Times(0);
 
     jobsMock->onConnectionResumed(false);
@@ -1108,7 +1075,7 @@ TEST_F(TestJobsFeature, ScheduledSubscriptionRecoveryRetryAfterStopIsIgnored)
 
     JobsRecoveryCallbacks callbacks;
     expectJobsRecoverySubscriptions(mockClient, ThingName, callbacks, false);
-    EXPECT_CALL(*notifier, onError(jobsMock.get(), ClientBaseErrorNotification::SUBSCRIPTION_FAILED, _)).Times(1);
+    EXPECT_CALL(*notifier, onError(_, _, _)).Times(0);
     EXPECT_CALL(*mockClient, PublishStartNextPendingJobExecution(_, _, _)).Times(0);
 
     jobsMock->onConnectionResumed(false);
@@ -1139,15 +1106,7 @@ TEST_F(TestJobsFeature, ConnectionResumedAfterSessionLossDoesNotPollWhenSubscrip
 
     JobsRecoveryCallbacks callbacks;
     expectJobsRecoverySubscriptions(mockClient, ThingName, callbacks);
-    EXPECT_CALL(
-        *notifier,
-        onError(
-            jobsMock.get(),
-            ClientBaseErrorNotification::SUBSCRIPTION_FAILED,
-            AllOf(
-                HasSubstr("UpdateJobExecution accepted"),
-                HasSubstr("ioError {42}"))))
-        .Times(1);
+    EXPECT_CALL(*notifier, onError(_, _, _)).Times(0);
     EXPECT_CALL(*mockClient, PublishStartNextPendingJobExecution(_, _, _)).Times(0);
     EXPECT_CALL(*jobsMock, publishUpdateJobExecutionStatusWithRetry(_, _, _, _)).Times(0);
 
@@ -1216,15 +1175,7 @@ TEST_F(TestJobsFeature, RejectedRecoverySubscriptionErrorHandlesNullResponse)
 
     JobsRecoveryCallbacks callbacks;
     expectJobsRecoverySubscriptions(mockClient, ThingName, callbacks);
-    EXPECT_CALL(
-        *notifier,
-        onError(
-            jobsMock.get(),
-            ClientBaseErrorNotification::SUBSCRIPTION_FAILED,
-            AllOf(
-                HasSubstr("UpdateJobExecution rejected"),
-                HasSubstr("ioError {42}"))))
-        .Times(1);
+    EXPECT_CALL(*notifier, onError(_, _, _)).Times(0);
     EXPECT_CALL(*mockClient, PublishStartNextPendingJobExecution(_, _, _)).Times(0);
 
     jobsMock->onConnectionResumed(false);

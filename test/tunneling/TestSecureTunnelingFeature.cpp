@@ -228,7 +228,7 @@ TEST_F(TestSecureTunnelingFeature, PresentSessionDoesNotResubscribeTunnelNotific
     secureTunnelingFeature->onConnectionResumed(true);
 }
 
-TEST_F(TestSecureTunnelingFeature, PresentSessionRecoversInitialSubscriptionQueueFailure)
+TEST_F(TestSecureTunnelingFeature, InitialSubscriptionQueueFailureRetriesWithoutReconnect)
 {
     Iotsecuretunneling::OnSubscribeComplete recoverySubAck;
 
@@ -237,29 +237,23 @@ TEST_F(TestSecureTunnelingFeature, PresentSessionRecoversInitialSubscriptionQueu
         .Times(2)
         .WillOnce(Return(false))
         .WillOnce(DoAll(SaveArg<3>(&recoverySubAck), Return(true)));
-    EXPECT_CALL(
-        *notifier,
-        onError(
-            secureTunnelingFeature.get(),
-            ClientBaseErrorNotification::SUBSCRIPTION_FAILED,
-            AllOf(HasSubstr("Failed to queue"), HasSubstr("tunnel notification"))))
-        .Times(1);
+    EXPECT_CALL(*notifier, onError(_, _, _)).Times(0);
     EXPECT_CALL(*notifier, onEvent(secureTunnelingFeature.get(), ClientBaseEventNotification::FEATURE_STARTED))
         .Times(1);
 
     secureTunnelingFeature->init(manager, notifier, config);
     secureTunnelingFeature->start();
-    secureTunnelingFeature->onConnectionResumed(true);
+
+    ASSERT_TRUE(secureTunnelingFeature->hasScheduledSubscriptionRecoveryRetry());
+    EXPECT_EQ(chrono::milliseconds(5000), secureTunnelingFeature->scheduledSubscriptionRecoveryRetryDelay);
+    secureTunnelingFeature->invokeScheduledSubscriptionRecoveryRetry();
 
     ASSERT_TRUE(recoverySubAck);
     recoverySubAck(0);
     secureTunnelingFeature->onConnectionResumed(true);
-
-    ASSERT_TRUE(secureTunnelingFeature->hasScheduledSubscriptionRecoveryRetry());
-    secureTunnelingFeature->invokeScheduledSubscriptionRecoveryRetry();
 }
 
-TEST_F(TestSecureTunnelingFeature, PresentSessionRecoversInitialSubscriptionSubAckFailure)
+TEST_F(TestSecureTunnelingFeature, InitialSubscriptionSubAckFailureRetriesWithoutReconnect)
 {
     Iotsecuretunneling::OnSubscribeComplete initialSubAck;
     Iotsecuretunneling::OnSubscribeComplete recoverySubAck;
@@ -269,6 +263,7 @@ TEST_F(TestSecureTunnelingFeature, PresentSessionRecoversInitialSubscriptionSubA
         .Times(2)
         .WillOnce(DoAll(SaveArg<3>(&initialSubAck), Return(true)))
         .WillOnce(DoAll(SaveArg<3>(&recoverySubAck), Return(true)));
+    EXPECT_CALL(*notifier, onError(_, _, _)).Times(0);
     EXPECT_CALL(*notifier, onEvent(secureTunnelingFeature.get(), ClientBaseEventNotification::FEATURE_STARTED))
         .Times(1);
 
@@ -277,7 +272,9 @@ TEST_F(TestSecureTunnelingFeature, PresentSessionRecoversInitialSubscriptionSubA
 
     ASSERT_TRUE(initialSubAck);
     initialSubAck(42);
-    secureTunnelingFeature->onConnectionResumed(true);
+
+    ASSERT_TRUE(secureTunnelingFeature->hasScheduledSubscriptionRecoveryRetry());
+    secureTunnelingFeature->invokeScheduledSubscriptionRecoveryRetry();
 
     ASSERT_TRUE(recoverySubAck);
     recoverySubAck(0);
@@ -295,6 +292,7 @@ TEST_F(TestSecureTunnelingFeature, CleanSessionHandlesImmediateSubscriptionQueue
         .WillOnce(DoAll(InvokeArgument<3>(0), Return(true)))
         .WillOnce(Return(false))
         .WillOnce(DoAll(SaveArg<3>(&retrySubAck), Return(true)));
+    EXPECT_CALL(*notifier, onError(_, _, _)).Times(0);
     EXPECT_CALL(*notifier, onEvent(secureTunnelingFeature.get(), ClientBaseEventNotification::FEATURE_STARTED))
         .Times(1);
 
@@ -323,6 +321,7 @@ TEST_F(TestSecureTunnelingFeature, FailedRecoverySubAckRetriesWithoutReconnect)
         .WillOnce(DoAll(InvokeArgument<3>(0), Return(true)))
         .WillOnce(DoAll(SaveArg<3>(&failedRecoverySubAck), Return(true)))
         .WillOnce(DoAll(SaveArg<3>(&retrySubAck), Return(true)));
+    EXPECT_CALL(*notifier, onError(_, _, _)).Times(0);
     EXPECT_CALL(*notifier, onEvent(secureTunnelingFeature.get(), ClientBaseEventNotification::FEATURE_STARTED))
         .Times(1);
 
