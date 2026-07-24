@@ -17,7 +17,7 @@ on:
           - "false"
 
 permissions:
-  contents: write
+  contents: read
 
 env:
   PACKAGE_NAME: aws-iot-device-client
@@ -30,21 +30,34 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.version.outputs.version }}
+      sha: ${{ steps.revision.outputs.sha }}
     steps:
       - name: Checkout release branch
         uses: actions/checkout@v4
         with:
           ref: ${{ env.SOURCE_REF }}
           fetch-depth: 0
+          persist-credentials: false
 
-      - name: Read version from .version
+      - name: Record release revision
+        id: revision
+        shell: bash
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Generate version from release revision
         id: version
         shell: bash
         run: |
           set -euo pipefail
 
+          cmake \
+            -DPROJECT_NAME="$PACKAGE_NAME" \
+            -DGIT_VERSION=ON \
+            -DGIT_EXECUTABLE="$(command -v git)" \
+            -P CMakeLists.txt.versioning
+
           if [[ ! -s .version ]]; then
-            echo ".version is missing or empty" >&2
+            echo ".version was not generated" >&2
             exit 1
           fi
 
@@ -77,11 +90,12 @@ jobs:
             binary_path: build/aws-iot-device-client
             asset_name: aws-iot-device-client-linux-arm64
     steps:
-      - name: Checkout release branch
+      - name: Checkout release revision
         uses: actions/checkout@v4
         with:
-          ref: ${{ env.SOURCE_REF }}
+          ref: ${{ needs.version.outputs.sha }}
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Build binary
         env:
@@ -120,16 +134,12 @@ jobs:
     name: Create GitHub release
     runs-on: ubuntu-latest
     if: ${{ inputs.dry_run == 'false' }}
+    permissions:
+      contents: write
     needs:
       - version
       - build
     steps:
-      - name: Checkout release branch
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ env.SOURCE_REF }}
-          fetch-depth: 0
-
       - name: Download release assets
         uses: actions/download-artifact@v4
         with:
@@ -152,6 +162,6 @@ jobs:
 
           gh release create "$VERSION" \
             release-assets/* \
-            --target "$RELEASE_BRANCH" \
+            --target "${{ needs.version.outputs.sha }}" \
             --title "$VERSION" \
             --notes "Release built from the ${RELEASE_BRANCH} branch."
