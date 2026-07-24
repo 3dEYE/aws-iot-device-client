@@ -17,7 +17,8 @@ namespace Aws
                     ERROR = 0,
                     WARN = 1,
                     INFO = 2,
-                    DEBUG = 3
+                    DEBUG = 3,
+                    TRACE = 4
                 };
 
                 namespace LogLevelMarshaller
