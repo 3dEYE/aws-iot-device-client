@@ -12,7 +12,7 @@
 
 ## Logging
 The AWS IoT Device Client has the capability to log directly to standard output or write logs to a log file. For
-either option, the logging level can be specified as either DEBUG, INFO, WARN, or ERROR. The logger implementation
+either option, the logging level can be specified as either TRACE, DEBUG, INFO, WARN, or ERROR. The logger implementation
 can be specified as either "STDOUT" (for standard output) or "FILE" (for logging to a file). If file based logging
 is specified, you can also specify a file to log to. If a file is not specified, the Device Client will log to 
 the default log location of `/var/log/aws-iot-device-client/aws-iot-device-client.log`. Keep in mind that the Device Client will need

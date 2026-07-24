@@ -489,14 +489,16 @@ TEST_F(TestJobsFeature, RepeatedStartDoesNotLaunchAnotherJobsThread)
     EXPECT_EQ(0, jobsMock->start());
 }
 
-TEST_F(TestJobsFeature, StartupThreadRetainsFeatureWhileWaitingForSubscriptionAcknowledgement)
+TEST_F(TestJobsFeature, StopCancelsStartupSubscriptionWaitAndJoinsWorker)
 {
     auto threadedJobs = make_shared<MockJobsFeature>();
-    auto safetyOwner = threadedJobs;
+    weak_ptr<MockJobsFeature> weakFeature = threadedJobs;
     auto feature = threadedJobs.get();
     auto delayedAckCaptured = make_shared<promise<void>>();
     auto delayedAckCapturedFuture = delayedAckCaptured->get_future();
     auto delayedAck = make_shared<Iotjobs::OnSubscribeComplete>();
+    promise<void> subscriptionsQueued;
+    future<void> subscriptionsQueuedFuture = subscriptionsQueued.get_future();
 
     EXPECT_CALL(*threadedJobs, launchJobsThread())
         .Times(1)
@@ -528,7 +530,9 @@ TEST_F(TestJobsFeature, StartupThreadRetainsFeatureWhileWaitingForSubscriptionAc
         *mockClient,
         SubscribeToUpdateJobExecutionRejected(ThingNameEq(ThingName), AWS_MQTT_QOS_AT_LEAST_ONCE, _, _))
         .Times(1)
-        .WillOnce(InvokeSubAck(0));
+        .WillOnce(DoAll(
+            InvokeWithoutArgs([&subscriptionsQueued]() { subscriptionsQueued.set_value(); }),
+            InvokeSubAck(0)));
     EXPECT_CALL(*mockClient, PublishStartNextPendingJobExecution(_, _, _)).Times(0);
     EXPECT_CALL(*notifier, onEvent(feature, ClientBaseEventNotification::FEATURE_STARTED)).Times(1);
     EXPECT_CALL(*notifier, onEvent(feature, ClientBaseEventNotification::FEATURE_STOPPED)).Times(1);
@@ -536,20 +540,94 @@ TEST_F(TestJobsFeature, StartupThreadRetainsFeatureWhileWaitingForSubscriptionAc
     threadedJobs->init(std::shared_ptr<Mqtt::MqttConnection>(), notifier, config);
     ASSERT_EQ(0, threadedJobs->start());
     ASSERT_EQ(future_status::ready, delayedAckCapturedFuture.wait_for(chrono::seconds(3)));
+    ASSERT_EQ(future_status::ready, subscriptionsQueuedFuture.wait_for(chrono::seconds(3)));
 
+    auto stopStart = chrono::steady_clock::now();
     EXPECT_EQ(0, threadedJobs->stop());
+    EXPECT_LT(chrono::steady_clock::now() - stopStart, chrono::seconds(3));
     threadedJobs.reset();
-    EXPECT_GT(safetyOwner.use_count(), 1);
+    EXPECT_TRUE(weakFeature.expired());
 
+    // Late acknowledgements are weak-owned and must be harmless after shutdown.
     (*delayedAck)(0);
-    auto workerExitDeadline = chrono::steady_clock::now() + chrono::seconds(3);
-    while (safetyOwner.use_count() > 1 && chrono::steady_clock::now() < workerExitDeadline)
+}
+
+TEST_F(TestJobsFeature, StopWaitsForStartupSubscriptionSubmissionToFinish)
+{
+    auto threadedJobs = make_shared<MockJobsFeature>();
+    auto feature = threadedJobs.get();
+    promise<void> subscribeEntered;
+    future<void> subscribeEnteredFuture = subscribeEntered.get_future();
+    promise<void> allowSubscribe;
+    shared_future<void> allowSubscribeFuture = allowSubscribe.get_future().share();
+    promise<void> stopStarted;
+    future<void> stopStartedFuture = stopStarted.get_future();
+    promise<void> stopCompleted;
+    future<void> stopCompletedFuture = stopCompleted.get_future();
+
+    EXPECT_CALL(*threadedJobs, launchJobsThread())
+        .Times(1)
+        .WillOnce(InvokeWithoutArgs(feature, &MockJobsFeature::invokeLaunchJobsThread));
+    EXPECT_CALL(*threadedJobs, createJobsClient()).Times(1).WillOnce(Return(mockClient));
+    EXPECT_CALL(
+        *mockClient,
+        SubscribeToStartNextPendingJobExecutionAccepted(
+            ThingNameEq(ThingName), AWS_MQTT_QOS_AT_LEAST_ONCE, _, _))
+        .Times(1)
+        .WillOnce(DoAll(
+            InvokeWithoutArgs([&]() {
+                subscribeEntered.set_value();
+                allowSubscribeFuture.wait();
+            }),
+            InvokeSubAck(0)));
+    EXPECT_CALL(
+        *mockClient,
+        SubscribeToStartNextPendingJobExecutionRejected(
+            ThingNameEq(ThingName), AWS_MQTT_QOS_AT_LEAST_ONCE, _, _))
+        .Times(1)
+        .WillOnce(InvokeSubAck(0));
+    EXPECT_CALL(
+        *mockClient,
+        SubscribeToNextJobExecutionChangedEvents(ThingNameEq(ThingName), AWS_MQTT_QOS_AT_LEAST_ONCE, _, _))
+        .Times(0);
+    EXPECT_CALL(
+        *mockClient,
+        SubscribeToUpdateJobExecutionAccepted(ThingNameEq(ThingName), AWS_MQTT_QOS_AT_LEAST_ONCE, _, _))
+        .Times(0);
+    EXPECT_CALL(
+        *mockClient,
+        SubscribeToUpdateJobExecutionRejected(ThingNameEq(ThingName), AWS_MQTT_QOS_AT_LEAST_ONCE, _, _))
+        .Times(0);
+    EXPECT_CALL(*mockClient, PublishStartNextPendingJobExecution(_, _, _)).Times(0);
+    EXPECT_CALL(*notifier, onEvent(feature, ClientBaseEventNotification::FEATURE_STARTED)).Times(1);
+    EXPECT_CALL(*notifier, onEvent(feature, ClientBaseEventNotification::FEATURE_STOPPED)).Times(1);
+
+    threadedJobs->init(std::shared_ptr<Mqtt::MqttConnection>(), notifier, config);
+    ASSERT_EQ(0, threadedJobs->start());
+    if (future_status::ready != subscribeEnteredFuture.wait_for(chrono::seconds(3)))
     {
-        this_thread::yield();
+        allowSubscribe.set_value();
+        threadedJobs->stop();
+        FAIL() << "Startup subscription did not begin";
     }
 
-    EXPECT_EQ(1, safetyOwner.use_count());
-    safetyOwner.reset();
+    thread stopThread([&]() {
+        stopStarted.set_value();
+        threadedJobs->stop();
+        stopCompleted.set_value();
+    });
+    if (future_status::ready != stopStartedFuture.wait_for(chrono::seconds(3)))
+    {
+        allowSubscribe.set_value();
+        stopThread.join();
+        FAIL() << "Feature stop did not start";
+    }
+    EXPECT_EQ(future_status::timeout, stopCompletedFuture.wait_for(chrono::milliseconds(100)));
+
+    allowSubscribe.set_value();
+    stopThread.join();
+
+    EXPECT_EQ(future_status::ready, stopCompletedFuture.wait_for(chrono::seconds(0)));
 }
 
 TEST_F(TestJobsFeature, RunJobsHappy)

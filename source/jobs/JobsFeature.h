@@ -23,6 +23,7 @@
 #include <future>
 #include <memory>
 #include <mutex>
+#include <thread>
 
 namespace Aws
 {
@@ -42,6 +43,8 @@ namespace Aws
                 {
                   public:
                     static constexpr char NAME[] = "Jobs";
+
+                    ~JobsFeature() override;
 
                     std::string getName() override;
 
@@ -132,6 +135,11 @@ namespace Aws
                      * \brief Ensures this single-use feature launches its startup thread only once
                      */
                     std::atomic<bool> startRequested{false};
+                    /**
+                     * \brief Owns the single Jobs startup worker so shutdown can wait for it to finish
+                     */
+                    std::mutex jobsThreadLock;
+                    std::thread jobsThread;
                     /**
                      * \brief Whether the jobs feature is currently executing a job
                      */
@@ -254,6 +262,16 @@ namespace Aws
                     StartupSubscriptionResult nextJobChangedResult;
                     StartupSubscriptionResult updateAcceptedResult;
                     StartupSubscriptionResult updateRejectedResult;
+
+                    /**
+                     * \brief Wakes any startup subscription acknowledgement waits during shutdown
+                     */
+                    void cancelStartupSubscriptionWaits();
+
+                    /**
+                     * \brief Waits for the Jobs startup worker to exit
+                     */
+                    void joinJobsThread();
 
                     // Outgoing Mqtt messages/topic subscriptions
                     /**

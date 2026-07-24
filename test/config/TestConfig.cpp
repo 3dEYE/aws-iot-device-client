@@ -822,6 +822,17 @@ TEST_F(ConfigTestFixture, LoggingConfigurationCLI)
     ASSERT_STREQ("./client.log", config.logConfig.deviceClientLogFile.c_str());
 }
 
+TEST_F(ConfigTestFixture, DeviceClientTraceLoggingConfigurationCLI)
+{
+    CliArgs cliArgs;
+    cliArgs[PlainConfig::LogConfig::CLI_LOG_LEVEL] = "trace";
+
+    PlainConfig config;
+    config.LoadFromCliArgs(cliArgs);
+
+    ASSERT_EQ(4, config.logConfig.deviceClientlogLevel); // Expect TRACE log level, which is 4
+}
+
 TEST_F(ConfigTestFixture, SDKLoggingConfigurationCLIDefaults)
 {
     CliArgs cliArgs;

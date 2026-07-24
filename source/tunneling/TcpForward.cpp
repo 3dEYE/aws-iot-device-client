@@ -127,9 +127,26 @@ namespace Aws
                     }
                 }
 
+                int TcpForward::ReadSocket(aws_byte_buf *buffer, size_t *amountRead)
+                {
+                    return aws_socket_read(&mSocket, buffer, amountRead);
+                }
+
                 void TcpForward::OnReadable(struct aws_socket *, int error_code)
                 {
-                    LOGM_TRACE(TAG, "TcpForward::OnReadable error_code=%d", error_code);
+                    if (error_code && error_code != AWS_IO_SOCKET_CLOSED)
+                    {
+                        LOGM_ERROR(TAG, "TcpForward::OnReadable error_code=%d", error_code);
+                        return;
+                    }
+                    if (error_code == AWS_IO_SOCKET_CLOSED)
+                    {
+                        LOG_TRACE(TAG, "TcpForward::OnReadable peer closed; draining buffered data");
+                    }
+                    else
+                    {
+                        LOG_TRACE(TAG, "TcpForward::OnReadable");
+                    }
 
                     Aws::Crt::ByteBuf everything; // For cumulating everything available
                     aws_byte_buf_init(&everything, mSharedCrtResourceManager->getAllocator(), 0);
@@ -142,7 +159,7 @@ namespace Aws
                     {
                         aws_byte_buf_reset(&chunk, false);
                         amountRead = 0;
-                        if (aws_socket_read(&mSocket, &chunk, &amountRead) == AWS_OP_SUCCESS && amountRead > 0)
+                        if (ReadSocket(&chunk, &amountRead) == AWS_OP_SUCCESS && amountRead > 0)
                         {
                             aws_byte_cursor chunkCursor = aws_byte_cursor_from_buf(&chunk);
                             aws_byte_buf_append_dynamic(&everything, &chunkCursor);
