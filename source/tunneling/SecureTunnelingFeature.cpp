@@ -69,6 +69,7 @@ namespace Aws
                 {
                     LOG_DEBUG(TAG, "SecureTunnelingFeature::stop");
                     {
+                        lock_guard<mutex> subscriptionLifecycleLock(mSubscriptionLifecycleLock);
                         lock_guard<mutex> lock(mConnectionRecoveryLock);
                         mStarted = false;
                         mSubscriptionNeedsRecovery = false;
@@ -86,6 +87,7 @@ namespace Aws
 
                 void SecureTunnelingFeature::onConnectionResumed(bool sessionPresent)
                 {
+                    lock_guard<mutex> subscriptionLifecycleLock(mSubscriptionLifecycleLock);
                     std::uint64_t recoveryGeneration;
                     {
                         lock_guard<mutex> lock(mConnectionRecoveryLock);
@@ -243,7 +245,9 @@ namespace Aws
                             &SecureTunnelingFeature::OnSubscribeToTunnelsNotifyResponse,
                             this,
                             placeholders::_1,
-                            placeholders::_2),
+                            placeholders::_2,
+                            isRecovery,
+                            recoveryGeneration),
                         bind(
                             &SecureTunnelingFeature::OnSubscribeComplete,
                             this,
@@ -268,8 +272,17 @@ namespace Aws
 
                 void SecureTunnelingFeature::OnSubscribeToTunnelsNotifyResponse(
                     SecureTunnelingNotifyResponse *response,
-                    int ioErr)
+                    int ioErr,
+                    bool isRecovery,
+                    std::uint64_t recoveryGeneration)
                 {
+                    lock_guard<mutex> lock(mConnectionRecoveryLock);
+                    if (!mStarted || (isRecovery && recoveryGeneration != mConnectionRecoveryGeneration))
+                    {
+                        LOG_DEBUG(TAG, "Ignoring stale tunnel notification");
+                        return;
+                    }
+
                     LOG_DEBUG(TAG, "Received MQTT Tunnel Notification");
 
                     if (ioErr || !response)

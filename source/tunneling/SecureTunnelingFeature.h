@@ -107,10 +107,14 @@ namespace Aws
                      *
                      * @param response MQTT new tunnel notification
                      * @param ioErr error code
+                     * @param isRecovery true when the handler belongs to a recovery subscription
+                     * @param recoveryGeneration identifies the recovery attempt that registered the handler
                      */
                     void OnSubscribeToTunnelsNotifyResponse(
                         Aws::Iotsecuretunneling::SecureTunnelingNotifyResponse *response,
-                        int ioErr);
+                        int ioErr,
+                        bool isRecovery,
+                        std::uint64_t recoveryGeneration);
 
                     /**
                      * \brief Callback when subscribe to MQTT new tunnel notification is complete
@@ -216,6 +220,11 @@ namespace Aws
                      * \brief Protects MQTT subscription recovery lifecycle state
                      */
                     std::mutex mConnectionRecoveryLock;
+
+                    /**
+                     * \brief Serializes recovery subscription queueing with lifecycle shutdown
+                     */
+                    std::mutex mSubscriptionLifecycleLock;
 
                     /**
                      * \brief True while the feature is running and can restore its MQTT subscription
