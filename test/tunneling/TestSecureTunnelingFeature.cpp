@@ -8,6 +8,9 @@
 #include "gtest/gtest.h"
 #include <aws/iotsecuretunneling/IotSecureTunnelingClient.h>
 #include <aws/iotsecuretunneling/SubscribeToTunnelsNotifyRequest.h>
+#include <chrono>
+#include <future>
+#include <thread>
 
 using namespace testing;
 using namespace std;
@@ -72,6 +75,33 @@ class FakeSecureTunnelContext : public SecureTunnelingContext
     bool IsDuplicateNotification(const SecureTunnelingNotifyResponse &response) override { return true; }
 };
 
+struct BlockingSecureTunnelContextState
+{
+    shared_ptr<promise<void>> connectEntered;
+    shared_future<void> allowConnect;
+    shared_ptr<promise<void>> destroyed;
+};
+
+class BlockingSecureTunnelContext : public SecureTunnelingContext
+{
+  public:
+    explicit BlockingSecureTunnelContext(const shared_ptr<BlockingSecureTunnelContextState> &state) : state(state) {}
+    ~BlockingSecureTunnelContext() override { state->destroyed->set_value(); }
+
+    bool ConnectToSecureTunnel() override
+    {
+        state->connectEntered->set_value();
+        state->allowConnect.wait();
+        return true;
+    }
+
+    void StopSecureTunnel() override {}
+    bool IsDuplicateNotification(const SecureTunnelingNotifyResponse &) override { return false; }
+
+  private:
+    shared_ptr<BlockingSecureTunnelContextState> state;
+};
+
 class MockSecureTunnelingFeature : public SecureTunnelingFeature
 {
   public:
@@ -82,6 +112,29 @@ class MockSecureTunnelingFeature : public SecureTunnelingFeature
         (const std::string &accessToken, const std::string &region, const uint16_t &port),
         (override));
     MOCK_METHOD(std::shared_ptr<AbstractIotSecureTunnelingClient>, createClient, (), (override));
+
+    void scheduleDelayedSubscriptionRecoveryRetry(
+        std::function<void()> retry,
+        std::chrono::milliseconds delay) override
+    {
+        scheduledSubscriptionRecoveryRetry = retry;
+        scheduledSubscriptionRecoveryRetryDelay = delay;
+    }
+
+    bool hasScheduledSubscriptionRecoveryRetry() const
+    {
+        return static_cast<bool>(scheduledSubscriptionRecoveryRetry);
+    }
+
+    void invokeScheduledSubscriptionRecoveryRetry()
+    {
+        auto retry = scheduledSubscriptionRecoveryRetry;
+        scheduledSubscriptionRecoveryRetry = nullptr;
+        retry();
+    }
+
+    std::function<void()> scheduledSubscriptionRecoveryRetry;
+    std::chrono::milliseconds scheduledSubscriptionRecoveryRetryDelay{0};
 };
 
 class MockIotSecureTunnelingClient : public AbstractIotSecureTunnelingClient
@@ -89,7 +142,7 @@ class MockIotSecureTunnelingClient : public AbstractIotSecureTunnelingClient
   public:
     MockIotSecureTunnelingClient() = default;
     MOCK_METHOD(
-        void,
+        bool,
         SubscribeToTunnelsNotify,
         (const Iotsecuretunneling::SubscribeToTunnelsNotifyRequest &request,
          Aws::Crt::Mqtt::QOS qos,
@@ -146,6 +199,558 @@ TEST_F(TestSecureTunnelingFeature, Init)
     ASSERT_EQ(0, secureTunnelingFeature->init(manager, notifier, config));
 }
 
+TEST_F(TestSecureTunnelingFeature, CleanSessionRestoresTunnelNotificationSubscription)
+{
+    EXPECT_CALL(*secureTunnelingFeature, createClient()).Times(1).WillOnce(Return(mockClient));
+    EXPECT_CALL(*mockClient, SubscribeToTunnelsNotify(ThingNameEq(thingName), AWS_MQTT_QOS_AT_LEAST_ONCE, _, _))
+        .Times(3)
+        .WillRepeatedly(DoAll(InvokeArgument<3>(0), Return(true)));
+    EXPECT_CALL(*notifier, onEvent(secureTunnelingFeature.get(), ClientBaseEventNotification::FEATURE_STARTED))
+        .Times(1);
+
+    secureTunnelingFeature->init(manager, notifier, config);
+    secureTunnelingFeature->start();
+    secureTunnelingFeature->onConnectionResumed(false);
+    secureTunnelingFeature->onConnectionResumed(false);
+}
+
+TEST_F(TestSecureTunnelingFeature, PresentSessionDoesNotResubscribeTunnelNotifications)
+{
+    EXPECT_CALL(*secureTunnelingFeature, createClient()).Times(1).WillOnce(Return(mockClient));
+    EXPECT_CALL(*mockClient, SubscribeToTunnelsNotify(ThingNameEq(thingName), AWS_MQTT_QOS_AT_LEAST_ONCE, _, _))
+        .Times(1)
+        .WillOnce(DoAll(InvokeArgument<3>(0), Return(true)));
+    EXPECT_CALL(*notifier, onEvent(secureTunnelingFeature.get(), ClientBaseEventNotification::FEATURE_STARTED))
+        .Times(1);
+
+    secureTunnelingFeature->init(manager, notifier, config);
+    secureTunnelingFeature->start();
+    secureTunnelingFeature->onConnectionResumed(true);
+}
+
+TEST_F(TestSecureTunnelingFeature, InitialSubscriptionQueueFailureRetriesWithoutReconnect)
+{
+    Iotsecuretunneling::OnSubscribeComplete recoverySubAck;
+
+    EXPECT_CALL(*secureTunnelingFeature, createClient()).Times(1).WillOnce(Return(mockClient));
+    EXPECT_CALL(*mockClient, SubscribeToTunnelsNotify(ThingNameEq(thingName), AWS_MQTT_QOS_AT_LEAST_ONCE, _, _))
+        .Times(2)
+        .WillOnce(Return(false))
+        .WillOnce(DoAll(SaveArg<3>(&recoverySubAck), Return(true)));
+    EXPECT_CALL(*notifier, onError(_, _, _)).Times(0);
+    EXPECT_CALL(*notifier, onEvent(secureTunnelingFeature.get(), ClientBaseEventNotification::FEATURE_STARTED))
+        .Times(1);
+
+    secureTunnelingFeature->init(manager, notifier, config);
+    secureTunnelingFeature->start();
+
+    ASSERT_TRUE(secureTunnelingFeature->hasScheduledSubscriptionRecoveryRetry());
+    EXPECT_EQ(chrono::milliseconds(5000), secureTunnelingFeature->scheduledSubscriptionRecoveryRetryDelay);
+    secureTunnelingFeature->invokeScheduledSubscriptionRecoveryRetry();
+
+    ASSERT_TRUE(recoverySubAck);
+    recoverySubAck(0);
+    secureTunnelingFeature->onConnectionResumed(true);
+}
+
+TEST_F(TestSecureTunnelingFeature, InitialSubscriptionSubAckFailureRetriesWithoutReconnect)
+{
+    Iotsecuretunneling::OnSubscribeComplete initialSubAck;
+    Iotsecuretunneling::OnSubscribeComplete recoverySubAck;
+
+    EXPECT_CALL(*secureTunnelingFeature, createClient()).Times(1).WillOnce(Return(mockClient));
+    EXPECT_CALL(*mockClient, SubscribeToTunnelsNotify(ThingNameEq(thingName), AWS_MQTT_QOS_AT_LEAST_ONCE, _, _))
+        .Times(2)
+        .WillOnce(DoAll(SaveArg<3>(&initialSubAck), Return(true)))
+        .WillOnce(DoAll(SaveArg<3>(&recoverySubAck), Return(true)));
+    EXPECT_CALL(*notifier, onError(_, _, _)).Times(0);
+    EXPECT_CALL(*notifier, onEvent(secureTunnelingFeature.get(), ClientBaseEventNotification::FEATURE_STARTED))
+        .Times(1);
+
+    secureTunnelingFeature->init(manager, notifier, config);
+    secureTunnelingFeature->start();
+
+    ASSERT_TRUE(initialSubAck);
+    initialSubAck(42);
+
+    ASSERT_TRUE(secureTunnelingFeature->hasScheduledSubscriptionRecoveryRetry());
+    secureTunnelingFeature->invokeScheduledSubscriptionRecoveryRetry();
+
+    ASSERT_TRUE(recoverySubAck);
+    recoverySubAck(0);
+    secureTunnelingFeature->onConnectionResumed(true);
+}
+
+TEST_F(TestSecureTunnelingFeature, CleanSessionHandlesImmediateSubscriptionQueueFailure)
+{
+    Iotsecuretunneling::OnSubscribeComplete retrySubAck;
+
+    EXPECT_CALL(*secureTunnelingFeature, createContext(_, _, _)).Times(0);
+    EXPECT_CALL(*secureTunnelingFeature, createClient()).Times(1).WillOnce(Return(mockClient));
+    EXPECT_CALL(*mockClient, SubscribeToTunnelsNotify(ThingNameEq(thingName), AWS_MQTT_QOS_AT_LEAST_ONCE, _, _))
+        .Times(3)
+        .WillOnce(DoAll(InvokeArgument<3>(0), Return(true)))
+        .WillOnce(Return(false))
+        .WillOnce(DoAll(SaveArg<3>(&retrySubAck), Return(true)));
+    EXPECT_CALL(*notifier, onError(_, _, _)).Times(0);
+    EXPECT_CALL(*notifier, onEvent(secureTunnelingFeature.get(), ClientBaseEventNotification::FEATURE_STARTED))
+        .Times(1);
+
+    secureTunnelingFeature->init(manager, notifier, config);
+    secureTunnelingFeature->start();
+    secureTunnelingFeature->onConnectionResumed(false);
+
+    ASSERT_TRUE(secureTunnelingFeature->hasScheduledSubscriptionRecoveryRetry());
+    EXPECT_EQ(chrono::milliseconds(5000), secureTunnelingFeature->scheduledSubscriptionRecoveryRetryDelay);
+    secureTunnelingFeature->invokeScheduledSubscriptionRecoveryRetry();
+
+    ASSERT_TRUE(retrySubAck);
+    retrySubAck(0);
+    secureTunnelingFeature->onConnectionResumed(true);
+}
+
+TEST_F(TestSecureTunnelingFeature, FailedRecoverySubAckRetriesWithoutReconnect)
+{
+    Iotsecuretunneling::OnSubscribeComplete failedRecoverySubAck;
+    Iotsecuretunneling::OnSubscribeComplete retrySubAck;
+
+    EXPECT_CALL(*secureTunnelingFeature, createContext(_, _, _)).Times(0);
+    EXPECT_CALL(*secureTunnelingFeature, createClient()).Times(1).WillOnce(Return(mockClient));
+    EXPECT_CALL(*mockClient, SubscribeToTunnelsNotify(ThingNameEq(thingName), AWS_MQTT_QOS_AT_LEAST_ONCE, _, _))
+        .Times(3)
+        .WillOnce(DoAll(InvokeArgument<3>(0), Return(true)))
+        .WillOnce(DoAll(SaveArg<3>(&failedRecoverySubAck), Return(true)))
+        .WillOnce(DoAll(SaveArg<3>(&retrySubAck), Return(true)));
+    EXPECT_CALL(*notifier, onError(_, _, _)).Times(0);
+    EXPECT_CALL(*notifier, onEvent(secureTunnelingFeature.get(), ClientBaseEventNotification::FEATURE_STARTED))
+        .Times(1);
+
+    secureTunnelingFeature->init(manager, notifier, config);
+    secureTunnelingFeature->start();
+    secureTunnelingFeature->onConnectionResumed(false);
+
+    ASSERT_TRUE(failedRecoverySubAck);
+    failedRecoverySubAck(42);
+
+    ASSERT_TRUE(secureTunnelingFeature->hasScheduledSubscriptionRecoveryRetry());
+    secureTunnelingFeature->invokeScheduledSubscriptionRecoveryRetry();
+
+    ASSERT_TRUE(retrySubAck);
+    retrySubAck(0);
+    secureTunnelingFeature->onConnectionResumed(true);
+}
+
+TEST_F(TestSecureTunnelingFeature, ScheduledRecoveryRetryAfterStopIsIgnored)
+{
+    EXPECT_CALL(*secureTunnelingFeature, createContext(_, _, _)).Times(0);
+    EXPECT_CALL(*secureTunnelingFeature, createClient()).Times(1).WillOnce(Return(mockClient));
+    EXPECT_CALL(*mockClient, SubscribeToTunnelsNotify(ThingNameEq(thingName), AWS_MQTT_QOS_AT_LEAST_ONCE, _, _))
+        .Times(2)
+        .WillOnce(DoAll(InvokeArgument<3>(0), Return(true)))
+        .WillOnce(Return(false));
+    EXPECT_CALL(*notifier, onEvent(secureTunnelingFeature.get(), ClientBaseEventNotification::FEATURE_STARTED))
+        .Times(1);
+    EXPECT_CALL(*notifier, onEvent(secureTunnelingFeature.get(), ClientBaseEventNotification::FEATURE_STOPPED))
+        .Times(1);
+
+    secureTunnelingFeature->init(manager, notifier, config);
+    secureTunnelingFeature->start();
+    secureTunnelingFeature->onConnectionResumed(false);
+
+    ASSERT_TRUE(secureTunnelingFeature->hasScheduledSubscriptionRecoveryRetry());
+    secureTunnelingFeature->stop();
+    secureTunnelingFeature->invokeScheduledSubscriptionRecoveryRetry();
+}
+
+TEST_F(TestSecureTunnelingFeature, ExistingSessionResumeRestartsInterruptedSubscriptionRecovery)
+{
+    Iotsecuretunneling::OnSubscribeComplete firstRecovery;
+    Iotsecuretunneling::OnSubscribeComplete secondRecovery;
+    Iotsecuretunneling::OnSubscribeComplete thirdRecovery;
+
+    EXPECT_CALL(*secureTunnelingFeature, createContext(_, _, _)).Times(0);
+    EXPECT_CALL(*secureTunnelingFeature, createClient()).Times(1).WillOnce(Return(mockClient));
+    EXPECT_CALL(*mockClient, SubscribeToTunnelsNotify(ThingNameEq(thingName), AWS_MQTT_QOS_AT_LEAST_ONCE, _, _))
+        .Times(4)
+        .WillOnce(DoAll(InvokeArgument<3>(0), Return(true)))
+        .WillOnce(DoAll(SaveArg<3>(&firstRecovery), Return(true)))
+        .WillOnce(DoAll(SaveArg<3>(&secondRecovery), Return(true)))
+        .WillOnce(DoAll(SaveArg<3>(&thirdRecovery), Return(true)));
+    EXPECT_CALL(*notifier, onEvent(secureTunnelingFeature.get(), ClientBaseEventNotification::FEATURE_STARTED))
+        .Times(1);
+
+    secureTunnelingFeature->init(manager, notifier, config);
+    secureTunnelingFeature->start();
+    secureTunnelingFeature->onConnectionResumed(false);
+    secureTunnelingFeature->onConnectionResumed(true);
+
+    firstRecovery(0);
+    secureTunnelingFeature->onConnectionResumed(true);
+
+    secondRecovery(0);
+    thirdRecovery(0);
+    secureTunnelingFeature->onConnectionResumed(true);
+}
+
+TEST_F(TestSecureTunnelingFeature, PreservedSessionAcceptsNotificationFromPendingRecoverySubscription)
+{
+    string accessToken = "12345";
+    string region = "us-west-2";
+    uint16_t port = 22;
+    Aws::Crt::Vector<Aws::Crt::String> services;
+    services.push_back("SSH");
+
+    response->ClientMode = "destination";
+    response->Services = services;
+    response->ClientAccessToken = accessToken.c_str();
+    response->Region = region.c_str();
+
+    bool contextCreated = false;
+    Iotsecuretunneling::OnSubscribeToTunnelsNotifyResponse lostSessionHandler;
+    Iotsecuretunneling::OnSubscribeToTunnelsNotifyResponse preservedRecoveryHandler;
+    Iotsecuretunneling::OnSubscribeComplete pendingRecoverySubAck;
+    Iotsecuretunneling::OnSubscribeComplete replacementRecoverySubAck;
+
+    EXPECT_CALL(*secureTunnelingFeature, createContext(StrEq(accessToken), StrEq(region), Eq(port)))
+        .Times(1)
+        .WillOnce(DoAll(Assign(&contextCreated, true), Return(ByMove(std::move(fakeContext)))));
+    EXPECT_CALL(*secureTunnelingFeature, createClient()).Times(1).WillOnce(Return(mockClient));
+    EXPECT_CALL(*mockClient, SubscribeToTunnelsNotify(ThingNameEq(thingName), AWS_MQTT_QOS_AT_LEAST_ONCE, _, _))
+        .Times(3)
+        .WillOnce(DoAll(SaveArg<2>(&lostSessionHandler), InvokeArgument<3>(0), Return(true)))
+        .WillOnce(
+            DoAll(SaveArg<2>(&preservedRecoveryHandler), SaveArg<3>(&pendingRecoverySubAck), Return(true)))
+        .WillOnce(DoAll(SaveArg<3>(&replacementRecoverySubAck), Return(true)));
+    EXPECT_CALL(*notifier, onEvent(secureTunnelingFeature.get(), ClientBaseEventNotification::FEATURE_STARTED))
+        .Times(1);
+
+    secureTunnelingFeature->init(manager, notifier, config);
+    secureTunnelingFeature->start();
+    secureTunnelingFeature->onConnectionResumed(false);
+    secureTunnelingFeature->onConnectionResumed(true);
+
+    ASSERT_TRUE(static_cast<bool>(lostSessionHandler));
+    ASSERT_TRUE(static_cast<bool>(preservedRecoveryHandler));
+    ASSERT_TRUE(static_cast<bool>(pendingRecoverySubAck));
+    ASSERT_TRUE(static_cast<bool>(replacementRecoverySubAck));
+    lostSessionHandler(response.get(), 0);
+    EXPECT_FALSE(contextCreated);
+    preservedRecoveryHandler(response.get(), 0);
+    EXPECT_TRUE(contextCreated);
+
+    replacementRecoverySubAck(0);
+    pendingRecoverySubAck(0);
+    secureTunnelingFeature->onConnectionResumed(true);
+}
+
+TEST_F(TestSecureTunnelingFeature, CleanSessionDoesNotSubscribeBeforeFeatureStarts)
+{
+    EXPECT_CALL(*secureTunnelingFeature, createClient()).Times(0);
+    EXPECT_CALL(*mockClient, SubscribeToTunnelsNotify(_, _, _, _)).Times(0);
+
+    secureTunnelingFeature->init(manager, notifier, config);
+    secureTunnelingFeature->onConnectionResumed(false);
+}
+
+TEST_F(TestSecureTunnelingFeature, CleanSessionDoesNotResubscribeAfterFeatureStops)
+{
+    EXPECT_CALL(*secureTunnelingFeature, createClient()).Times(1).WillOnce(Return(mockClient));
+    EXPECT_CALL(*mockClient, SubscribeToTunnelsNotify(ThingNameEq(thingName), AWS_MQTT_QOS_AT_LEAST_ONCE, _, _))
+        .Times(1)
+        .WillOnce(DoAll(InvokeArgument<3>(0), Return(true)));
+    EXPECT_CALL(*notifier, onEvent(secureTunnelingFeature.get(), ClientBaseEventNotification::FEATURE_STARTED))
+        .Times(1);
+    EXPECT_CALL(*notifier, onEvent(secureTunnelingFeature.get(), ClientBaseEventNotification::FEATURE_STOPPED))
+        .Times(1);
+
+    secureTunnelingFeature->init(manager, notifier, config);
+    secureTunnelingFeature->start();
+    secureTunnelingFeature->stop();
+    secureTunnelingFeature->onConnectionResumed(false);
+}
+
+TEST_F(TestSecureTunnelingFeature, StopWaitsForRecoverySubscriptionAndIgnoresLateNotification)
+{
+    string accessToken = "12345";
+    string region = "us-west-2";
+    uint16_t port = 22;
+    Aws::Crt::Vector<Aws::Crt::String> services;
+    services.push_back("SSH");
+
+    response->ClientMode = "destination";
+    response->Services = services;
+    response->ClientAccessToken = accessToken.c_str();
+    response->Region = region.c_str();
+
+    Iotsecuretunneling::OnSubscribeToTunnelsNotifyResponse recoveryHandler;
+    promise<void> recoverySubscribeEntered;
+    future<void> recoverySubscribeEnteredFuture = recoverySubscribeEntered.get_future();
+    promise<void> allowRecoverySubscribe;
+    shared_future<void> allowRecoverySubscribeFuture = allowRecoverySubscribe.get_future().share();
+    promise<void> stopStarted;
+    future<void> stopStartedFuture = stopStarted.get_future();
+    promise<void> stopCompleted;
+    future<void> stopCompletedFuture = stopCompleted.get_future();
+
+    EXPECT_CALL(*secureTunnelingFeature, createContext(_, _, _)).Times(0);
+    EXPECT_CALL(*secureTunnelingFeature, createClient()).Times(1).WillOnce(Return(mockClient));
+    EXPECT_CALL(*mockClient, SubscribeToTunnelsNotify(ThingNameEq(thingName), AWS_MQTT_QOS_AT_LEAST_ONCE, _, _))
+        .Times(2)
+        .WillOnce(DoAll(InvokeArgument<3>(0), Return(true)))
+        .WillOnce(DoAll(
+            SaveArg<2>(&recoveryHandler),
+            InvokeWithoutArgs([&]() {
+                recoverySubscribeEntered.set_value();
+                allowRecoverySubscribeFuture.wait();
+            }),
+            Return(true)));
+    EXPECT_CALL(*notifier, onEvent(secureTunnelingFeature.get(), ClientBaseEventNotification::FEATURE_STARTED))
+        .Times(1);
+    EXPECT_CALL(*notifier, onEvent(secureTunnelingFeature.get(), ClientBaseEventNotification::FEATURE_STOPPED))
+        .Times(1);
+
+    secureTunnelingFeature->init(manager, notifier, config);
+    secureTunnelingFeature->start();
+
+    thread recoveryThread([&]() { secureTunnelingFeature->onConnectionResumed(false); });
+    if (future_status::ready != recoverySubscribeEnteredFuture.wait_for(chrono::seconds(3)))
+    {
+        allowRecoverySubscribe.set_value();
+        recoveryThread.join();
+        FAIL() << "Recovery subscription did not start";
+    }
+
+    thread stopThread([&]() {
+        stopStarted.set_value();
+        secureTunnelingFeature->stop();
+        stopCompleted.set_value();
+    });
+    if (future_status::ready != stopStartedFuture.wait_for(chrono::seconds(3)))
+    {
+        allowRecoverySubscribe.set_value();
+        recoveryThread.join();
+        stopThread.join();
+        FAIL() << "Feature stop did not start";
+    }
+    EXPECT_EQ(future_status::timeout, stopCompletedFuture.wait_for(chrono::seconds(3)));
+
+    allowRecoverySubscribe.set_value();
+    recoveryThread.join();
+    stopThread.join();
+
+    EXPECT_EQ(future_status::ready, stopCompletedFuture.wait_for(chrono::seconds(0)));
+    ASSERT_TRUE(static_cast<bool>(recoveryHandler));
+    recoveryHandler(response.get(), 0);
+}
+
+TEST_F(TestSecureTunnelingFeature, TunnelNotificationAfterStopIsIgnored)
+{
+    string accessToken = "12345";
+    string region = "us-west-2";
+    Aws::Crt::Vector<Aws::Crt::String> services;
+    services.push_back("SSH");
+
+    response->ClientMode = "destination";
+    response->Services = services;
+    response->ClientAccessToken = accessToken.c_str();
+    response->Region = region.c_str();
+
+    Iotsecuretunneling::OnSubscribeToTunnelsNotifyResponse notificationHandler;
+    EXPECT_CALL(*secureTunnelingFeature, createContext(_, _, _)).Times(0);
+    EXPECT_CALL(*secureTunnelingFeature, createClient()).Times(1).WillOnce(Return(mockClient));
+    EXPECT_CALL(*mockClient, SubscribeToTunnelsNotify(ThingNameEq(thingName), AWS_MQTT_QOS_AT_LEAST_ONCE, _, _))
+        .Times(1)
+        .WillOnce(DoAll(SaveArg<2>(&notificationHandler), InvokeArgument<3>(0), Return(true)));
+    EXPECT_CALL(*notifier, onEvent(secureTunnelingFeature.get(), ClientBaseEventNotification::FEATURE_STARTED))
+        .Times(1);
+    EXPECT_CALL(*notifier, onEvent(secureTunnelingFeature.get(), ClientBaseEventNotification::FEATURE_STOPPED))
+        .Times(1);
+
+    secureTunnelingFeature->init(manager, notifier, config);
+    secureTunnelingFeature->start();
+    secureTunnelingFeature->stop();
+
+    ASSERT_TRUE(static_cast<bool>(notificationHandler));
+    notificationHandler(response.get(), 0);
+}
+
+TEST_F(TestSecureTunnelingFeature, SessionRecoveryPreservesTunnelConnectionAlreadyInProgress)
+{
+    string accessToken = "12345";
+    string region = "us-west-2";
+    uint16_t port = 22;
+    Aws::Crt::Vector<Aws::Crt::String> services;
+    services.push_back("SSH");
+
+    response->ClientMode = "destination";
+    response->Services = services;
+    response->ClientAccessToken = accessToken.c_str();
+    response->Region = region.c_str();
+
+    auto connectEntered = make_shared<promise<void>>();
+    auto connectEnteredFuture = connectEntered->get_future();
+    auto allowConnect = make_shared<promise<void>>();
+    auto allowConnectFuture = allowConnect->get_future().share();
+    auto contextDestroyed = make_shared<promise<void>>();
+    auto contextDestroyedFuture = contextDestroyed->get_future();
+    auto contextState = make_shared<BlockingSecureTunnelContextState>(
+        BlockingSecureTunnelContextState{connectEntered, allowConnectFuture, contextDestroyed});
+    unique_ptr<SecureTunnelingContext> blockingContext(new BlockingSecureTunnelContext(contextState));
+
+    Iotsecuretunneling::OnSubscribeToTunnelsNotifyResponse notificationHandler;
+    promise<void> recoveryCompleted;
+    future<void> recoveryCompletedFuture = recoveryCompleted.get_future();
+
+    EXPECT_CALL(*secureTunnelingFeature, createContext(StrEq(accessToken), StrEq(region), Eq(port)))
+        .Times(1)
+        .WillOnce(Return(ByMove(std::move(blockingContext))));
+    EXPECT_CALL(*secureTunnelingFeature, createClient()).Times(1).WillOnce(Return(mockClient));
+    EXPECT_CALL(*mockClient, SubscribeToTunnelsNotify(ThingNameEq(thingName), AWS_MQTT_QOS_AT_LEAST_ONCE, _, _))
+        .Times(2)
+        .WillOnce(DoAll(SaveArg<2>(&notificationHandler), InvokeArgument<3>(0), Return(true)))
+        .WillOnce(DoAll(InvokeArgument<3>(0), Return(true)));
+    EXPECT_CALL(*notifier, onEvent(secureTunnelingFeature.get(), ClientBaseEventNotification::FEATURE_STARTED))
+        .Times(1);
+    EXPECT_CALL(*notifier, onEvent(secureTunnelingFeature.get(), ClientBaseEventNotification::FEATURE_STOPPED))
+        .Times(1);
+
+    secureTunnelingFeature->init(manager, notifier, config);
+    secureTunnelingFeature->start();
+    ASSERT_TRUE(static_cast<bool>(notificationHandler));
+
+    thread notificationThread([&]() { notificationHandler(response.get(), 0); });
+    if (future_status::ready != connectEnteredFuture.wait_for(chrono::seconds(3)))
+    {
+        allowConnect->set_value();
+        notificationThread.join();
+        secureTunnelingFeature->stop();
+        FAIL() << "Tunnel connection did not start";
+    }
+
+    thread recoveryThread([&]() {
+        secureTunnelingFeature->onConnectionResumed(false);
+        recoveryCompleted.set_value();
+    });
+    if (future_status::ready != recoveryCompletedFuture.wait_for(chrono::seconds(3)))
+    {
+        allowConnect->set_value();
+        notificationThread.join();
+        recoveryThread.join();
+        secureTunnelingFeature->stop();
+        FAIL() << "Subscription recovery waited for the tunnel connection";
+    }
+    recoveryThread.join();
+
+    allowConnect->set_value();
+    notificationThread.join();
+
+    EXPECT_EQ(future_status::timeout, contextDestroyedFuture.wait_for(chrono::seconds(0)));
+    secureTunnelingFeature->stop();
+    EXPECT_EQ(future_status::timeout, contextDestroyedFuture.wait_for(chrono::seconds(0)));
+    secureTunnelingFeature.reset();
+    EXPECT_EQ(future_status::ready, contextDestroyedFuture.wait_for(chrono::seconds(0)));
+}
+
+TEST_F(TestSecureTunnelingFeature, StopDoesNotWaitForTunnelConnectionAndDiscardsStaleContext)
+{
+    string accessToken = "12345";
+    string region = "us-west-2";
+    uint16_t port = 22;
+    Aws::Crt::Vector<Aws::Crt::String> services;
+    services.push_back("SSH");
+
+    response->ClientMode = "destination";
+    response->Services = services;
+    response->ClientAccessToken = accessToken.c_str();
+    response->Region = region.c_str();
+
+    auto connectEntered = make_shared<promise<void>>();
+    auto connectEnteredFuture = connectEntered->get_future();
+    auto allowConnect = make_shared<promise<void>>();
+    auto allowConnectFuture = allowConnect->get_future().share();
+    auto contextDestroyed = make_shared<promise<void>>();
+    auto contextDestroyedFuture = contextDestroyed->get_future();
+    auto contextState = make_shared<BlockingSecureTunnelContextState>(
+        BlockingSecureTunnelContextState{connectEntered, allowConnectFuture, contextDestroyed});
+    unique_ptr<SecureTunnelingContext> blockingContext(new BlockingSecureTunnelContext(contextState));
+
+    Iotsecuretunneling::OnSubscribeToTunnelsNotifyResponse notificationHandler;
+    promise<void> stopCompleted;
+    future<void> stopCompletedFuture = stopCompleted.get_future();
+
+    EXPECT_CALL(*secureTunnelingFeature, createContext(StrEq(accessToken), StrEq(region), Eq(port)))
+        .Times(1)
+        .WillOnce(Return(ByMove(std::move(blockingContext))));
+    EXPECT_CALL(*secureTunnelingFeature, createClient()).Times(1).WillOnce(Return(mockClient));
+    EXPECT_CALL(*mockClient, SubscribeToTunnelsNotify(ThingNameEq(thingName), AWS_MQTT_QOS_AT_LEAST_ONCE, _, _))
+        .Times(1)
+        .WillOnce(DoAll(SaveArg<2>(&notificationHandler), InvokeArgument<3>(0), Return(true)));
+    EXPECT_CALL(*notifier, onEvent(secureTunnelingFeature.get(), ClientBaseEventNotification::FEATURE_STARTED))
+        .Times(1);
+    EXPECT_CALL(*notifier, onEvent(secureTunnelingFeature.get(), ClientBaseEventNotification::FEATURE_STOPPED))
+        .Times(1);
+
+    secureTunnelingFeature->init(manager, notifier, config);
+    secureTunnelingFeature->start();
+    ASSERT_TRUE(static_cast<bool>(notificationHandler));
+
+    weak_ptr<MockSecureTunnelingFeature> weakFeature = secureTunnelingFeature;
+    thread notificationThread([&]() { notificationHandler(response.get(), 0); });
+    if (future_status::ready != connectEnteredFuture.wait_for(chrono::seconds(3)))
+    {
+        allowConnect->set_value();
+        notificationThread.join();
+        secureTunnelingFeature->stop();
+        FAIL() << "Tunnel connection did not start";
+    }
+
+    auto feature = secureTunnelingFeature.get();
+    thread stopThread([&]() {
+        feature->stop();
+        stopCompleted.set_value();
+    });
+    if (future_status::ready != stopCompletedFuture.wait_for(chrono::seconds(3)))
+    {
+        allowConnect->set_value();
+        notificationThread.join();
+        stopThread.join();
+        FAIL() << "Feature stop waited for the tunnel connection";
+    }
+    stopThread.join();
+
+    secureTunnelingFeature.reset();
+    EXPECT_FALSE(weakFeature.expired());
+
+    allowConnect->set_value();
+    notificationThread.join();
+
+    EXPECT_EQ(future_status::ready, contextDestroyedFuture.wait_for(chrono::seconds(0)));
+    EXPECT_TRUE(weakFeature.expired());
+}
+
+TEST_F(TestSecureTunnelingFeature, CleanSessionDoesNotSubscribeWhenTunnelNotificationsAreDisabled)
+{
+    config.tunneling.subscribeNotification = false;
+    config.tunneling.destinationAccessToken = "access-token";
+    config.tunneling.region = "us-west-2";
+    config.tunneling.port = 22;
+
+    EXPECT_CALL(*secureTunnelingFeature, createContext(StrEq("access-token"), StrEq("us-west-2"), Eq(22)))
+        .Times(1)
+        .WillOnce(Return(ByMove(std::move(fakeContext))));
+    EXPECT_CALL(*secureTunnelingFeature, createClient()).Times(0);
+    EXPECT_CALL(*mockClient, SubscribeToTunnelsNotify(_, _, _, _)).Times(0);
+    EXPECT_CALL(*notifier, onEvent(secureTunnelingFeature.get(), ClientBaseEventNotification::FEATURE_STARTED))
+        .Times(1);
+    EXPECT_CALL(*notifier, onEvent(secureTunnelingFeature.get(), ClientBaseEventNotification::FEATURE_STOPPED))
+        .Times(1);
+
+    secureTunnelingFeature->init(manager, notifier, config);
+    secureTunnelingFeature->start();
+    secureTunnelingFeature->onConnectionResumed(false);
+    secureTunnelingFeature->stop();
+}
+
 TEST_F(TestSecureTunnelingFeature, CreateSSHContextHappy)
 {
     /**
@@ -168,7 +773,7 @@ TEST_F(TestSecureTunnelingFeature, CreateSSHContextHappy)
     EXPECT_CALL(*secureTunnelingFeature, createClient()).Times(1).WillOnce(Return(mockClient));
     EXPECT_CALL(*mockClient, SubscribeToTunnelsNotify(ThingNameEq(thingName), AWS_MQTT_QOS_AT_LEAST_ONCE, _, _))
         .Times(1)
-        .WillOnce(DoAll(InvokeArgument<2>(response.get(), 0), InvokeArgument<3>(0)));
+        .WillOnce(DoAll(InvokeArgument<2>(response.get(), 0), InvokeArgument<3>(0), Return(true)));
     EXPECT_CALL(*notifier, onEvent(_, _)).Times(2);
     secureTunnelingFeature->init(manager, notifier, config);
     secureTunnelingFeature->start();
@@ -197,7 +802,7 @@ TEST_F(TestSecureTunnelingFeature, CreateVNCContextHappy)
     EXPECT_CALL(*secureTunnelingFeature, createClient()).Times(1).WillOnce(Return(mockClient));
     EXPECT_CALL(*mockClient, SubscribeToTunnelsNotify(ThingNameEq(thingName), AWS_MQTT_QOS_AT_LEAST_ONCE, _, _))
         .Times(1)
-        .WillOnce(DoAll(InvokeArgument<2>(response.get(), 0), InvokeArgument<3>(0)));
+        .WillOnce(DoAll(InvokeArgument<2>(response.get(), 0), InvokeArgument<3>(0), Return(true)));
     EXPECT_CALL(*notifier, onEvent(_, _)).Times(2);
     secureTunnelingFeature->init(manager, notifier, config);
     secureTunnelingFeature->start();
@@ -214,7 +819,7 @@ TEST_F(TestSecureTunnelingFeature, ResponseNULL)
     EXPECT_CALL(*secureTunnelingFeature, createClient()).Times(1).WillOnce(Return(mockClient));
     EXPECT_CALL(*mockClient, SubscribeToTunnelsNotify(ThingNameEq(thingName), AWS_MQTT_QOS_AT_LEAST_ONCE, _, _))
         .Times(1)
-        .WillOnce(DoAll(InvokeArgument<2>(nullptr, 1), InvokeArgument<3>(0)));
+        .WillOnce(DoAll(InvokeArgument<2>(nullptr, 1), InvokeArgument<3>(0), Return(true)));
     EXPECT_CALL(*notifier, onEvent(_, _)).Times(2);
     secureTunnelingFeature->init(manager, notifier, config);
     secureTunnelingFeature->start();
@@ -242,7 +847,7 @@ TEST_F(TestSecureTunnelingFeature, ResponseIoError)
     EXPECT_CALL(*secureTunnelingFeature, createClient()).Times(1).WillOnce(Return(mockClient));
     EXPECT_CALL(*mockClient, SubscribeToTunnelsNotify(ThingNameEq(thingName), AWS_MQTT_QOS_AT_LEAST_ONCE, _, _))
         .Times(1)
-        .WillOnce(DoAll(InvokeArgument<2>(response.get(), 1), InvokeArgument<3>(0)));
+        .WillOnce(DoAll(InvokeArgument<2>(response.get(), 1), InvokeArgument<3>(0), Return(true)));
     EXPECT_CALL(*notifier, onEvent(_, _)).Times(2);
     secureTunnelingFeature->init(manager, notifier, config);
     secureTunnelingFeature->start();
@@ -273,7 +878,11 @@ TEST_F(TestSecureTunnelingFeature, DuplicateResponse)
     EXPECT_CALL(*mockClient, SubscribeToTunnelsNotify(ThingNameEq(thingName), AWS_MQTT_QOS_AT_LEAST_ONCE, _, _))
         .Times(1)
         .WillOnce(
-            DoAll(InvokeArgument<2>(response.get(), 0), InvokeArgument<2>(response.get(), 0), InvokeArgument<3>(0)));
+            DoAll(
+                InvokeArgument<2>(response.get(), 0),
+                InvokeArgument<2>(response.get(), 0),
+                InvokeArgument<3>(0),
+                Return(true)));
     EXPECT_CALL(*notifier, onEvent(_, _)).Times(2);
     secureTunnelingFeature->init(manager, notifier, config);
     secureTunnelingFeature->start();
@@ -302,7 +911,7 @@ TEST_F(TestSecureTunnelingFeature, MultipleServices)
     EXPECT_CALL(*secureTunnelingFeature, createClient()).Times(1).WillOnce(Return(mockClient));
     EXPECT_CALL(*mockClient, SubscribeToTunnelsNotify(ThingNameEq(thingName), AWS_MQTT_QOS_AT_LEAST_ONCE, _, _))
         .Times(1)
-        .WillOnce(DoAll(InvokeArgument<2>(response.get(), 1), InvokeArgument<3>(0)));
+        .WillOnce(DoAll(InvokeArgument<2>(response.get(), 1), InvokeArgument<3>(0), Return(true)));
     EXPECT_CALL(*notifier, onEvent(_, _)).Times(2);
     secureTunnelingFeature->init(manager, notifier, config);
     secureTunnelingFeature->start();
@@ -330,7 +939,7 @@ TEST_F(TestSecureTunnelingFeature, UnsupportedService)
     EXPECT_CALL(*secureTunnelingFeature, createClient()).Times(1).WillOnce(Return(mockClient));
     EXPECT_CALL(*mockClient, SubscribeToTunnelsNotify(ThingNameEq(thingName), AWS_MQTT_QOS_AT_LEAST_ONCE, _, _))
         .Times(1)
-        .WillOnce(DoAll(InvokeArgument<2>(response.get(), 1), InvokeArgument<3>(0)));
+        .WillOnce(DoAll(InvokeArgument<2>(response.get(), 1), InvokeArgument<3>(0), Return(true)));
     EXPECT_CALL(*notifier, onEvent(_, _)).Times(2);
     secureTunnelingFeature->init(manager, notifier, config);
     secureTunnelingFeature->start();
@@ -357,7 +966,7 @@ TEST_F(TestSecureTunnelingFeature, NoServices)
     EXPECT_CALL(*secureTunnelingFeature, createClient()).Times(1).WillOnce(Return(mockClient));
     EXPECT_CALL(*mockClient, SubscribeToTunnelsNotify(ThingNameEq(thingName), AWS_MQTT_QOS_AT_LEAST_ONCE, _, _))
         .Times(1)
-        .WillOnce(DoAll(InvokeArgument<2>(response.get(), 1), InvokeArgument<3>(0)));
+        .WillOnce(DoAll(InvokeArgument<2>(response.get(), 1), InvokeArgument<3>(0), Return(true)));
     EXPECT_CALL(*notifier, onEvent(_, _)).Times(2);
     secureTunnelingFeature->init(manager, notifier, config);
     secureTunnelingFeature->start();
@@ -385,7 +994,7 @@ TEST_F(TestSecureTunnelingFeature, SourceMode)
     EXPECT_CALL(*secureTunnelingFeature, createClient()).Times(1).WillOnce(Return(mockClient));
     EXPECT_CALL(*mockClient, SubscribeToTunnelsNotify(ThingNameEq(thingName), AWS_MQTT_QOS_AT_LEAST_ONCE, _, _))
         .Times(1)
-        .WillOnce(DoAll(InvokeArgument<2>(response.get(), 1), InvokeArgument<3>(0)));
+        .WillOnce(DoAll(InvokeArgument<2>(response.get(), 1), InvokeArgument<3>(0), Return(true)));
     EXPECT_CALL(*notifier, onEvent(_, _)).Times(2);
     secureTunnelingFeature->init(manager, notifier, config);
     secureTunnelingFeature->start();

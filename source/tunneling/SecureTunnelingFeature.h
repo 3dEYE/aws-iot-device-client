@@ -12,6 +12,11 @@
 #include "aws/crt/http/HttpProxyStrategy.h"
 #include <aws/iotdevicecommon/IotDevice.h>
 #include <aws/iotsecuretunneling/SecureTunnelingNotifyResponse.h>
+#include <chrono>
+#include <cstdint>
+#include <functional>
+#include <memory>
+#include <mutex>
 
 namespace Aws
 {
@@ -24,7 +29,9 @@ namespace Aws
                 /**
                  * \brief Provides IoT Secure Tunneling related functionality within the Device Client
                  */
-                class SecureTunnelingFeature : public Feature
+                class SecureTunnelingFeature
+                    : public Feature,
+                      public std::enable_shared_from_this<SecureTunnelingFeature>
                 {
                   public:
                     static constexpr char NAME[] = "Secure Tunneling";
@@ -57,6 +64,7 @@ namespace Aws
                     std::string getName() override;
                     int start() override;
                     int stop() override;
+                    void onConnectionResumed(bool sessionPresent) override;
 
                     /**
                      * \brief Returns the port number of the given service
@@ -87,6 +95,14 @@ namespace Aws
                      */
                     void RunSecureTunneling();
 
+                    /**
+                     * \brief Subscribe to MQTT new tunnel notifications
+                     *
+                     * @param isRecovery true when restoring the subscription after a clean MQTT session
+                     * @param recoveryGeneration identifies the current recovery attempt
+                     */
+                    bool SubscribeToTunnelNotifications(bool isRecovery, std::uint64_t recoveryGeneration);
+
                     //
                     // MQTT Tunnel Notification
                     //
@@ -96,17 +112,39 @@ namespace Aws
                      *
                      * @param response MQTT new tunnel notification
                      * @param ioErr error code
+                     * @param subscriptionGeneration identifies the subscription that registered the handle
                      */
                     void OnSubscribeToTunnelsNotifyResponse(
                         Aws::Iotsecuretunneling::SecureTunnelingNotifyResponse *response,
-                        int ioErr);
+                        int ioErr,
+                        std::uint64_t subscriptionGeneration);
 
                     /**
                      * \brief Callback when subscribe to MQTT new tunnel notification is complete
                      *
                      * @param ioErr error code
                      */
-                    void OnSubscribeComplete(int ioErr) const;
+                    void OnSubscribeComplete(
+                        int ioErr,
+                        bool isRecovery,
+                        std::uint64_t recoveryGeneration);
+
+                    /**
+                     * \brief Schedules another tunnel notification subscription recovery attempt
+                     */
+                    void requestSubscriptionRecoveryRetry(std::uint64_t failedRecoveryGeneration);
+
+                    /**
+                     * \brief Starts another recovery attempt if the failed attempt is still current
+                     */
+                    void retrySubscriptionRecovery(std::uint64_t failedRecoveryGeneration);
+
+                    /**
+                     * \brief Dispatches a delayed recovery task; virtual to allow deterministic tests
+                     */
+                    virtual void scheduleDelayedSubscriptionRecoveryRetry(
+                        std::function<void()> retry,
+                        std::chrono::milliseconds delay);
 
                     /**
                      * \brief Get the secure tunneling data plain endpoint given an AWS region
@@ -197,6 +235,46 @@ namespace Aws
                      * \brief Should the Secure Tunneling feature subscribe to MQTT new tunnel notification?
                      */
                     bool mSubscribeNotification{true};
+
+                    /**
+                     * \brief Protects MQTT subscription recovery lifecycle state
+                     */
+                    std::mutex mConnectionRecoveryLock;
+
+                    /**
+                     * \brief Serializes recovery subscription queueing with lifecycle shutdown
+                     */
+                    std::mutex mSubscriptionLifecycleLock;
+
+                    /**
+                     * \brief Serializes tunnel notification processing without blocking lifecycle shutdown
+                     */
+                    std::mutex mTunnelNotificationLock;
+
+                    /**
+                     * \brief True while the feature is running and can restore its MQTT subscription
+                     */
+                    bool mStarted{false};
+
+                    /**
+                     * \brief Identifies the current subscription recovery attempt so stale callbacks can be ignored
+                     */
+                    std::uint64_t mConnectionRecoveryGeneration{0};
+
+                    /**
+                     * \brief Oldest notification handler generation that can still belong to the current MQTT session
+                     */
+                    std::uint64_t mOldestValidSubscriptionGeneration{0};
+
+                    /**
+                     * \brief Identifies stop boundaries without invalidating notifications during MQTT recovery
+                     */
+                    std::uint64_t mFeatureLifecycleGeneration{0};
+
+                    /**
+                     * \brief Remains true until the current subscription recovery receives a successful SUBACK
+                     */
+                    bool mSubscriptionNeedsRecovery{false};
 
                     /**
                      * \brief Endpoint override. Normally the endpoint is determined by `region` only. This is only used

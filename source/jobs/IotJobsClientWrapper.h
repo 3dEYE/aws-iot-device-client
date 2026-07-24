@@ -28,31 +28,31 @@ namespace Aws
                         Aws::Crt::Mqtt::QOS qos,
                         const Iotjobs::OnPublishComplete &onPubAck) = 0;
 
-                    virtual void SubscribeToStartNextPendingJobExecutionAccepted(
+                    virtual bool SubscribeToStartNextPendingJobExecutionAccepted(
                         const Iotjobs::StartNextPendingJobExecutionSubscriptionRequest &request,
                         Aws::Crt::Mqtt::QOS qos,
                         const Iotjobs::OnSubscribeToStartNextPendingJobExecutionAcceptedResponse &handler,
                         const Iotjobs::OnSubscribeComplete &onSubAck) = 0;
 
-                    virtual void SubscribeToStartNextPendingJobExecutionRejected(
+                    virtual bool SubscribeToStartNextPendingJobExecutionRejected(
                         const Iotjobs::StartNextPendingJobExecutionSubscriptionRequest &request,
                         Aws::Crt::Mqtt::QOS qos,
                         const Iotjobs::OnSubscribeToStartNextPendingJobExecutionRejectedResponse &handler,
                         const Iotjobs::OnSubscribeComplete &onSubAck) = 0;
 
-                    virtual void SubscribeToNextJobExecutionChangedEvents(
+                    virtual bool SubscribeToNextJobExecutionChangedEvents(
                         const Iotjobs::NextJobExecutionChangedSubscriptionRequest &request,
                         Aws::Crt::Mqtt::QOS qos,
                         const Iotjobs::OnSubscribeToNextJobExecutionChangedEventsResponse &handler,
                         const Iotjobs::OnSubscribeComplete &onSubAck) = 0;
 
-                    virtual void SubscribeToUpdateJobExecutionAccepted(
+                    virtual bool SubscribeToUpdateJobExecutionAccepted(
                         const Iotjobs::UpdateJobExecutionSubscriptionRequest &request,
                         Aws::Crt::Mqtt::QOS qos,
                         const Iotjobs::OnSubscribeToUpdateJobExecutionAcceptedResponse &handler,
                         const Iotjobs::OnSubscribeComplete &onSubAck) = 0;
 
-                    virtual void SubscribeToUpdateJobExecutionRejected(
+                    virtual bool SubscribeToUpdateJobExecutionRejected(
                         const Iotjobs::UpdateJobExecutionSubscriptionRequest &request,
                         Aws::Crt::Mqtt::QOS qos,
                         const Iotjobs::OnSubscribeToUpdateJobExecutionRejectedResponse &handler,
@@ -73,31 +73,31 @@ namespace Aws
                         Aws::Crt::Mqtt::QOS qos,
                         const Iotjobs::OnPublishComplete &onPubAck) override;
 
-                    void SubscribeToStartNextPendingJobExecutionAccepted(
+                    bool SubscribeToStartNextPendingJobExecutionAccepted(
                         const Iotjobs::StartNextPendingJobExecutionSubscriptionRequest &request,
                         Aws::Crt::Mqtt::QOS qos,
                         const Iotjobs::OnSubscribeToStartNextPendingJobExecutionAcceptedResponse &handler,
                         const Iotjobs::OnSubscribeComplete &onSubAck) override;
 
-                    void SubscribeToStartNextPendingJobExecutionRejected(
+                    bool SubscribeToStartNextPendingJobExecutionRejected(
                         const Iotjobs::StartNextPendingJobExecutionSubscriptionRequest &request,
                         Aws::Crt::Mqtt::QOS qos,
                         const Iotjobs::OnSubscribeToStartNextPendingJobExecutionRejectedResponse &handler,
                         const Iotjobs::OnSubscribeComplete &onSubAck) override;
 
-                    void SubscribeToNextJobExecutionChangedEvents(
+                    bool SubscribeToNextJobExecutionChangedEvents(
                         const Iotjobs::NextJobExecutionChangedSubscriptionRequest &request,
                         Aws::Crt::Mqtt::QOS qos,
                         const Iotjobs::OnSubscribeToNextJobExecutionChangedEventsResponse &handler,
                         const Iotjobs::OnSubscribeComplete &onSubAck) override;
 
-                    void SubscribeToUpdateJobExecutionAccepted(
+                    bool SubscribeToUpdateJobExecutionAccepted(
                         const Iotjobs::UpdateJobExecutionSubscriptionRequest &request,
                         Aws::Crt::Mqtt::QOS qos,
                         const Iotjobs::OnSubscribeToUpdateJobExecutionAcceptedResponse &handler,
                         const Iotjobs::OnSubscribeComplete &onSubAck) override;
 
-                    void SubscribeToUpdateJobExecutionRejected(
+                    bool SubscribeToUpdateJobExecutionRejected(
                         const Iotjobs::UpdateJobExecutionSubscriptionRequest &request,
                         Aws::Crt::Mqtt::QOS qos,
                         const Iotjobs::OnSubscribeToUpdateJobExecutionRejectedResponse &handler,

@@ -25,45 +25,45 @@ void IotJobsClientWrapper::PublishStartNextPendingJobExecution(
 {
     jobsClient->PublishStartNextPendingJobExecution(request, qos, onPubAck);
 }
-void IotJobsClientWrapper::SubscribeToStartNextPendingJobExecutionAccepted(
+bool IotJobsClientWrapper::SubscribeToStartNextPendingJobExecutionAccepted(
     const StartNextPendingJobExecutionSubscriptionRequest &request,
     Aws::Crt::Mqtt::QOS qos,
     const OnSubscribeToStartNextPendingJobExecutionAcceptedResponse &handler,
     const OnSubscribeComplete &onSubAck)
 {
-    jobsClient->SubscribeToStartNextPendingJobExecutionAccepted(request, qos, handler, onSubAck);
+    return jobsClient->SubscribeToStartNextPendingJobExecutionAccepted(request, qos, handler, onSubAck);
 }
-void IotJobsClientWrapper::SubscribeToStartNextPendingJobExecutionRejected(
+bool IotJobsClientWrapper::SubscribeToStartNextPendingJobExecutionRejected(
     const StartNextPendingJobExecutionSubscriptionRequest &request,
     Aws::Crt::Mqtt::QOS qos,
     const OnSubscribeToStartNextPendingJobExecutionRejectedResponse &handler,
     const OnSubscribeComplete &onSubAck)
 {
-    jobsClient->SubscribeToStartNextPendingJobExecutionRejected(request, qos, handler, onSubAck);
+    return jobsClient->SubscribeToStartNextPendingJobExecutionRejected(request, qos, handler, onSubAck);
 }
-void IotJobsClientWrapper::SubscribeToNextJobExecutionChangedEvents(
+bool IotJobsClientWrapper::SubscribeToNextJobExecutionChangedEvents(
     const NextJobExecutionChangedSubscriptionRequest &request,
     Aws::Crt::Mqtt::QOS qos,
     const OnSubscribeToNextJobExecutionChangedEventsResponse &handler,
     const OnSubscribeComplete &onSubAck)
 {
-    jobsClient->SubscribeToNextJobExecutionChangedEvents(request, qos, handler, onSubAck);
+    return jobsClient->SubscribeToNextJobExecutionChangedEvents(request, qos, handler, onSubAck);
 }
-void IotJobsClientWrapper::SubscribeToUpdateJobExecutionAccepted(
+bool IotJobsClientWrapper::SubscribeToUpdateJobExecutionAccepted(
     const UpdateJobExecutionSubscriptionRequest &request,
     Aws::Crt::Mqtt::QOS qos,
     const OnSubscribeToUpdateJobExecutionAcceptedResponse &handler,
     const OnSubscribeComplete &onSubAck)
 {
-    jobsClient->SubscribeToUpdateJobExecutionAccepted(request, qos, handler, onSubAck);
+    return jobsClient->SubscribeToUpdateJobExecutionAccepted(request, qos, handler, onSubAck);
 }
-void IotJobsClientWrapper::SubscribeToUpdateJobExecutionRejected(
+bool IotJobsClientWrapper::SubscribeToUpdateJobExecutionRejected(
     const UpdateJobExecutionSubscriptionRequest &request,
     Aws::Crt::Mqtt::QOS qos,
     const OnSubscribeToUpdateJobExecutionRejectedResponse &handler,
     const OnSubscribeComplete &onSubAck)
 {
-    jobsClient->SubscribeToUpdateJobExecutionRejected(request, qos, handler, onSubAck);
+    return jobsClient->SubscribeToUpdateJobExecutionRejected(request, qos, handler, onSubAck);
 }
 void IotJobsClientWrapper::PublishUpdateJobExecution(
     const UpdateJobExecutionRequest &request,

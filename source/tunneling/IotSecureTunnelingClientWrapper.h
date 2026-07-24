@@ -22,7 +22,7 @@ namespace Aws
                 {
                   public:
                     virtual ~AbstractIotSecureTunnelingClient() = default;
-                    virtual void SubscribeToTunnelsNotify(
+                    virtual bool SubscribeToTunnelsNotify(
                         const Aws::Iotsecuretunneling::SubscribeToTunnelsNotifyRequest &request,
                         Aws::Crt::Mqtt::QOS qos,
                         const Iotsecuretunneling::OnSubscribeToTunnelsNotifyResponse &handler,
@@ -37,7 +37,7 @@ namespace Aws
                   public:
                     explicit IotSecureTunnelingClientWrapper(
                         std::shared_ptr<Aws::Crt::Mqtt::MqttConnection> connection);
-                    virtual void SubscribeToTunnelsNotify(
+                    virtual bool SubscribeToTunnelsNotify(
                         const Aws::Iotsecuretunneling::SubscribeToTunnelsNotifyRequest &request,
                         Aws::Crt::Mqtt::QOS qos,
                         const Iotsecuretunneling::OnSubscribeToTunnelsNotifyResponse &handler,

@@ -28,6 +28,7 @@ namespace Aws
                 constexpr char SecureTunnelingFeature::TAG[];
                 constexpr char SecureTunnelingFeature::NAME[];
                 constexpr char SecureTunnelingFeature::DEFAULT_PROXY_ENDPOINT_HOST_FORMAT[];
+                constexpr long SUBSCRIPTION_RECOVERY_RETRY_DELAY_MILLIS = 5 * 1000;
                 std::map<std::string, uint16_t> SecureTunnelingFeature::mServiceToPortMap;
 
                 SecureTunnelingFeature::SecureTunnelingFeature() = default;
@@ -53,6 +54,13 @@ namespace Aws
 
                 int SecureTunnelingFeature::start()
                 {
+                    {
+                        lock_guard<mutex> lock(mConnectionRecoveryLock);
+                        mStarted = true;
+                        mSubscriptionNeedsRecovery = false;
+                        ++mConnectionRecoveryGeneration;
+                        mOldestValidSubscriptionGeneration = mConnectionRecoveryGeneration;
+                    }
                     RunSecureTunneling();
                     auto self = static_cast<Feature *>(this);
                     mClientBaseNotifier->onEvent(self, ClientBaseEventNotification::FEATURE_STARTED);
@@ -62,6 +70,15 @@ namespace Aws
                 int SecureTunnelingFeature::stop()
                 {
                     LOG_DEBUG(TAG, "SecureTunnelingFeature::stop");
+                    {
+                        lock_guard<mutex> subscriptionLifecycleLock(mSubscriptionLifecycleLock);
+                        lock_guard<mutex> lock(mConnectionRecoveryLock);
+                        mStarted = false;
+                        mSubscriptionNeedsRecovery = false;
+                        ++mConnectionRecoveryGeneration;
+                        mOldestValidSubscriptionGeneration = mConnectionRecoveryGeneration;
+                        ++mFeatureLifecycleGeneration;
+                    }
                     for (auto &c : mContexts)
                     {
                         c->StopSecureTunnel();
@@ -70,6 +87,64 @@ namespace Aws
                     auto self = static_cast<Feature *>(this);
                     mClientBaseNotifier->onEvent(self, ClientBaseEventNotification::FEATURE_STOPPED);
                     return 0;
+                }
+
+                void SecureTunnelingFeature::onConnectionResumed(bool sessionPresent)
+                {
+                    lock_guard<mutex> subscriptionLifecycleLock(mSubscriptionLifecycleLock);
+                    std::uint64_t recoveryGeneration;
+                    {
+                        lock_guard<mutex> lock(mConnectionRecoveryLock);
+                        if (!mStarted)
+                        {
+                            LOG_DEBUG(
+                                TAG,
+                                "Skipping tunnel notification subscription recovery because the feature is not "
+                                "running");
+                            return;
+                        }
+
+                        if (!mSubscribeNotification)
+                        {
+                            LOG_DEBUG(
+                                TAG,
+                                "Skipping tunnel notification subscription recovery because notifications are "
+                                "disabled");
+                            return;
+                        }
+
+                        if (!iotSecureTunnelingClient)
+                        {
+                            LOG_ERROR(
+                                TAG,
+                                "Cannot restore tunnel notification subscription because the client is not ready");
+                            return;
+                        }
+
+                        if (!sessionPresent)
+                        {
+                            mSubscriptionNeedsRecovery = true;
+                        }
+
+                        if (!mSubscriptionNeedsRecovery)
+                        {
+                            LOG_DEBUG(
+                                TAG,
+                                "MQTT session resumed with the tunnel notification subscription intact");
+                            return;
+                        }
+
+                        recoveryGeneration = ++mConnectionRecoveryGeneration;
+                        if (!sessionPresent)
+                        {
+                            mOldestValidSubscriptionGeneration = recoveryGeneration;
+                        }
+                    }
+
+                    LOG_INFO(
+                        TAG,
+                        "Restoring tunnel notification subscription after a lost or interrupted MQTT session recovery");
+                    SubscribeToTunnelNotifications(true, recoveryGeneration);
                 }
 
                 uint16_t SecureTunnelingFeature::GetPortFromService(const std::string &service)
@@ -147,20 +222,14 @@ namespace Aws
 
                     if (mSubscribeNotification)
                     {
-                        SubscribeToTunnelsNotifyRequest request;
-                        request.ThingName = mThingName.c_str();
-
-                        iotSecureTunnelingClient = createClient();
-
-                        iotSecureTunnelingClient->SubscribeToTunnelsNotify(
-                            request,
-                            AWS_MQTT_QOS_AT_LEAST_ONCE,
-                            bind(
-                                &SecureTunnelingFeature::OnSubscribeToTunnelsNotifyResponse,
-                                this,
-                                placeholders::_1,
-                                placeholders::_2),
-                            bind(&SecureTunnelingFeature::OnSubscribeComplete, this, placeholders::_1));
+                        auto client = createClient();
+                        std::uint64_t subscriptionGeneration;
+                        {
+                            lock_guard<mutex> lock(mConnectionRecoveryLock);
+                            iotSecureTunnelingClient = move(client);
+                            subscriptionGeneration = mConnectionRecoveryGeneration;
+                        }
+                        SubscribeToTunnelNotifications(false, subscriptionGeneration);
                     }
                     else
                     {
@@ -172,25 +241,85 @@ namespace Aws
                     }
                 }
 
+                bool SecureTunnelingFeature::SubscribeToTunnelNotifications(
+                    bool isRecovery,
+                    std::uint64_t recoveryGeneration)
+                {
+                    SubscribeToTunnelsNotifyRequest request;
+                    request.ThingName = mThingName.c_str();
+                    weak_ptr<SecureTunnelingFeature> weakSelf = shared_from_this();
+
+                    bool queued = iotSecureTunnelingClient->SubscribeToTunnelsNotify(
+                        request,
+                        AWS_MQTT_QOS_AT_LEAST_ONCE,
+                        [weakSelf, recoveryGeneration](SecureTunnelingNotifyResponse *response, int ioErr) {
+                            auto self = weakSelf.lock();
+                            if (self)
+                            {
+                                self->OnSubscribeToTunnelsNotifyResponse(response, ioErr, recoveryGeneration);
+                            }
+                        },
+                        [weakSelf, isRecovery, recoveryGeneration](int ioErr) {
+                            auto self = weakSelf.lock();
+                            if (self)
+                            {
+                                self->OnSubscribeComplete(ioErr, isRecovery, recoveryGeneration);
+                            }
+                        });
+
+                    if (!queued)
+                    {
+                        if (isRecovery)
+                        {
+                            LOG_ERROR(TAG, "Couldn't queue tunnel notification subscription recovery");
+                        }
+                        else
+                        {
+                            LOG_ERROR(TAG, "Couldn't queue tunnel notification subscription");
+                        }
+
+                        bool retryRecovery = false;
+                        {
+                            lock_guard<mutex> lock(mConnectionRecoveryLock);
+                            if (mStarted && recoveryGeneration == mConnectionRecoveryGeneration)
+                            {
+                                mSubscriptionNeedsRecovery = true;
+                                retryRecovery = true;
+                            }
+                        }
+                        if (retryRecovery)
+                        {
+                            requestSubscriptionRecoveryRetry(recoveryGeneration);
+                        }
+                    }
+
+                    return queued;
+                }
+
                 void SecureTunnelingFeature::OnSubscribeToTunnelsNotifyResponse(
                     SecureTunnelingNotifyResponse *response,
-                    int ioErr)
+                    int ioErr,
+                    std::uint64_t subscriptionGeneration)
                 {
+                    lock_guard<mutex> notificationLock(mTunnelNotificationLock);
+                    std::uint64_t featureLifecycleGeneration;
+                    {
+                        lock_guard<mutex> lock(mConnectionRecoveryLock);
+                        if (!mStarted || subscriptionGeneration < mOldestValidSubscriptionGeneration ||
+                            subscriptionGeneration > mConnectionRecoveryGeneration)
+                        {
+                            LOG_DEBUG(TAG, "Ignoring tunnel notification from a stale MQTT session");
+                            return;
+                        }
+                        featureLifecycleGeneration = mFeatureLifecycleGeneration;
+                    }
+
                     LOG_DEBUG(TAG, "Received MQTT Tunnel Notification");
 
                     if (ioErr || !response)
                     {
                         LOGM_ERROR(TAG, "OnSubscribeToTunnelsNotifyResponse received error. ioErr=%d", ioErr);
                         return;
-                    }
-
-                    for (auto &c : mContexts)
-                    {
-                        if (c->IsDuplicateNotification(*response))
-                        {
-                            LOG_INFO(TAG, "Received duplicate MQTT Tunnel Notification. Ignoring...");
-                            return;
-                        }
                     }
 
                     string clientMode = response->ClientMode->c_str();
@@ -236,27 +365,153 @@ namespace Aws
                         return;
                     }
 
+                    {
+                        lock_guard<mutex> lock(mConnectionRecoveryLock);
+                        if (!mStarted || featureLifecycleGeneration != mFeatureLifecycleGeneration)
+                        {
+                            LOG_DEBUG(TAG, "Ignoring tunnel notification invalidated by a feature lifecycle change");
+                            return;
+                        }
+
+                        for (auto &c : mContexts)
+                        {
+                            if (c->IsDuplicateNotification(*response))
+                            {
+                                LOG_INFO(TAG, "Received duplicate MQTT Tunnel Notification. Ignoring...");
+                                return;
+                            }
+                        }
+                    }
+
                     LOGM_DEBUG(TAG, "Region=%s, Service=%s", region.c_str(), service.c_str());
 
                     auto context = createContext(accessToken, region, port);
 
-                    if (context->ConnectToSecureTunnel())
+                    if (!context->ConnectToSecureTunnel())
                     {
-                        mContexts.push_back(std::move(context));
+                        return;
                     }
+
+                    lock_guard<mutex> lock(mConnectionRecoveryLock);
+                    if (!mStarted || featureLifecycleGeneration != mFeatureLifecycleGeneration)
+                    {
+                        LOG_DEBUG(TAG, "Discarding tunnel opened after a feature lifecycle change");
+                        return;
+                    }
+
+                    mContexts.push_back(std::move(context));
                 }
 
-                void SecureTunnelingFeature::OnSubscribeComplete(int ioErr) const
+                void SecureTunnelingFeature::OnSubscribeComplete(
+                    int ioErr,
+                    bool isRecovery,
+                    std::uint64_t recoveryGeneration)
                 {
-                    LOG_DEBUG(TAG, "Subscribed to tunnel notification topic");
-
-                    if (ioErr)
+                    if (!isRecovery)
                     {
-                        LOGM_ERROR(TAG, "Couldn't subscribe to tunnel notification topic. ioErr=%d", ioErr);
-                        // TODO: Handle subscription error
-
-                        // TODO: UA-5775 - Incorporate the baseClientNotifier onError event
+                        if (ioErr)
+                        {
+                            LOGM_ERROR(TAG, "Couldn't subscribe to tunnel notification topic. ioErr=%d", ioErr);
+                            bool retryRecovery = false;
+                            {
+                                lock_guard<mutex> lock(mConnectionRecoveryLock);
+                                if (mStarted && recoveryGeneration == mConnectionRecoveryGeneration)
+                                {
+                                    mSubscriptionNeedsRecovery = true;
+                                    retryRecovery = true;
+                                }
+                            }
+                            if (retryRecovery)
+                            {
+                                requestSubscriptionRecoveryRetry(recoveryGeneration);
+                            }
+                        }
+                        else
+                        {
+                            LOG_DEBUG(TAG, "Subscribed to tunnel notification topic");
+                        }
+                        return;
                     }
+
+                    {
+                        lock_guard<mutex> lock(mConnectionRecoveryLock);
+                        if (!mStarted || recoveryGeneration != mConnectionRecoveryGeneration ||
+                            !mSubscriptionNeedsRecovery)
+                        {
+                            LOG_DEBUG(TAG, "Ignoring stale tunnel notification subscription recovery callback");
+                            return;
+                        }
+
+                        if (!ioErr)
+                        {
+                            mSubscriptionNeedsRecovery = false;
+                            LOG_INFO(TAG, "Restored tunnel notification subscription");
+                            return;
+                        }
+                    }
+
+                    LOGM_ERROR(TAG, "Couldn't restore tunnel notification subscription. ioErr=%d", ioErr);
+                    requestSubscriptionRecoveryRetry(recoveryGeneration);
+                }
+
+                void SecureTunnelingFeature::requestSubscriptionRecoveryRetry(
+                    std::uint64_t failedRecoveryGeneration)
+                {
+                    {
+                        lock_guard<mutex> lock(mConnectionRecoveryLock);
+                        if (!mStarted || !mSubscribeNotification || !iotSecureTunnelingClient ||
+                            !mSubscriptionNeedsRecovery ||
+                            failedRecoveryGeneration != mConnectionRecoveryGeneration)
+                        {
+                            return;
+                        }
+                    }
+
+                    LOGM_INFO(
+                        TAG,
+                        "Retrying tunnel notification subscription recovery in %ld milliseconds",
+                        SUBSCRIPTION_RECOVERY_RETRY_DELAY_MILLIS);
+                    weak_ptr<SecureTunnelingFeature> weakSelf = shared_from_this();
+                    scheduleDelayedSubscriptionRecoveryRetry(
+                        [weakSelf, failedRecoveryGeneration]() {
+                            auto self = weakSelf.lock();
+                            if (self)
+                            {
+                                self->retrySubscriptionRecovery(failedRecoveryGeneration);
+                            }
+                        },
+                        std::chrono::milliseconds(SUBSCRIPTION_RECOVERY_RETRY_DELAY_MILLIS));
+                }
+
+                void SecureTunnelingFeature::retrySubscriptionRecovery(std::uint64_t failedRecoveryGeneration)
+                {
+                    lock_guard<mutex> subscriptionLifecycleLock(mSubscriptionLifecycleLock);
+                    std::uint64_t recoveryGeneration;
+                    {
+                        lock_guard<mutex> lock(mConnectionRecoveryLock);
+                        if (!mStarted || !mSubscribeNotification || !iotSecureTunnelingClient ||
+                            !mSubscriptionNeedsRecovery ||
+                            failedRecoveryGeneration != mConnectionRecoveryGeneration)
+                        {
+                            return;
+                        }
+
+                        recoveryGeneration = ++mConnectionRecoveryGeneration;
+                    }
+
+                    LOG_INFO(TAG, "Retrying tunnel notification subscription recovery");
+                    SubscribeToTunnelNotifications(true, recoveryGeneration);
+                }
+
+                void SecureTunnelingFeature::scheduleDelayedSubscriptionRecoveryRetry(
+                    std::function<void()> retry,
+                    std::chrono::milliseconds delay)
+                {
+                    std::thread retryThread([retry, delay]() {
+                        std::this_thread::sleep_for(delay);
+                        retry();
+                    });
+                    retryThread.detach();
                 }
 
                 string SecureTunnelingFeature::GetEndpoint(const string &region)

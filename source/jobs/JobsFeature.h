@@ -16,6 +16,14 @@
 #include "JobDocument.h"
 #include "JobEngine.h"
 
+#include <atomic>
+#include <chrono>
+#include <cstdint>
+#include <functional>
+#include <future>
+#include <memory>
+#include <mutex>
+
 namespace Aws
 {
     namespace Iot
@@ -28,7 +36,9 @@ namespace Aws
                 /**
                  * \brief Provides IoT Jobs related functionality within the Device Client
                  */
-                class JobsFeature : public Feature
+                class JobsFeature
+                    : public Feature,
+                      public std::enable_shared_from_this<JobsFeature>
                 {
                   public:
                     static constexpr char NAME[] = "Jobs";
@@ -75,12 +85,17 @@ namespace Aws
                     // Interface methods defined in Feature.h
                     virtual int start() override;
                     virtual int stop() override;
+                    virtual void onConnectionResumed(bool sessionPresent) override;
 
                   protected:
                     /**
                      * \brief Begins running the Jobs feature
                      */
                     void runJobs();
+                    /**
+                     * \brief Launches the Jobs startup thread
+                     */
+                    virtual void launchJobsThread();
                     /**
                      * \brief An enum used for UpdateJobExecution responses
                      */
@@ -95,7 +110,7 @@ namespace Aws
                     /**
                      * \brief Used by the logger to specify that log messages are coming from the Jobs feature
                      */
-                    const char *TAG = "JobsFeature.cpp";
+                    static constexpr char TAG[] = "JobsFeature.cpp";
 
                     /**
                      * \brief The default directory that the Jobs feature will use to find executables matching
@@ -114,9 +129,24 @@ namespace Aws
                      */
                     std::atomic<bool> needStop{false};
                     /**
+                     * \brief Ensures this single-use feature launches its startup thread only once
+                     */
+                    std::atomic<bool> startRequested{false};
+                    /**
                      * \brief Whether the jobs feature is currently executing a job
                      */
                     std::atomic<bool> handlingJob{false};
+                    /**
+                     * \brief Serializes subscription recovery with feature shutdown
+                     */
+                    std::mutex subscriptionLifecycleLock;
+                    std::mutex connectionRecoveryLock;
+                    bool jobsClientReady{false};
+                    std::uint64_t connectionRecoveryGeneration{0};
+                    size_t pendingRecoverySubscriptions{0};
+                    bool connectionRecoveryFailed{false};
+                    std::uint8_t completedRecoverySubscriptionMask{0};
+                    bool subscriptionsNeedRecovery{false};
 
                     /**
                      * \brief A lock used to control access to the map of EphemeralPromise
@@ -184,13 +214,6 @@ namespace Aws
                      */
                     void ackSubscribeToStartNextJobRejected(int ioError);
                     /**
-                     * \brief Acknowledgement that IoT Core has received our StartNextPendingJob message
-                     *
-                     * @param ioError a non-zero code here indicates a problem. Turn on logging in IoT Core
-                     * and check CloudWatch for more insights on errors
-                     */
-                    void ackStartNextPendingJobPub(int ioError) const;
-                    /**
                      * \brief Acknowledgement that IoT Core has received our UpdateJobExecutionStatus message
                      *
                      * @param ioError a non-zero code here indicates a problem. Turn on logging in IoT Core
@@ -199,14 +222,80 @@ namespace Aws
                     void ackUpdateJobExecutionStatus(int ioError) const;
                     void ackSubscribeToUpdateJobExecutionAccepted(int ioError);
                     void ackSubscribeToUpdateJobExecutionRejected(int ioError);
-                    std::promise<int> updateAcceptedPromise;
-                    std::promise<int> updateRejectedPromise;
+                    void reportSubscriptionQueueFailure(const char *subscriptionName);
+
+                    template <typename... Args>
+                    std::function<void(Args...)> createWeakCallback(void (JobsFeature::*handler)(Args...))
+                    {
+                        std::weak_ptr<JobsFeature> weakSelf = shared_from_this();
+                        return [weakSelf, handler](Args... args) {
+                            auto self = weakSelf.lock();
+                            if (self)
+                            {
+                                ((*self).*handler)(args...);
+                            }
+                        };
+                    }
+
+                    struct StartupSubscriptionResult
+                    {
+                        std::promise<int> result;
+                        std::once_flag completionFlag;
+
+                        std::future<int> getFuture() { return result.get_future(); }
+                        void complete(int ioError)
+                        {
+                            std::call_once(completionFlag, [this, ioError]() { result.set_value(ioError); });
+                        }
+                    };
+
+                    StartupSubscriptionResult startNextAcceptedResult;
+                    StartupSubscriptionResult startNextRejectedResult;
+                    StartupSubscriptionResult nextJobChangedResult;
+                    StartupSubscriptionResult updateAcceptedResult;
+                    StartupSubscriptionResult updateRejectedResult;
 
                     // Outgoing Mqtt messages/topic subscriptions
                     /**
                      * \brief Publishes a request to startNextPendingJobExecution
                      */
                     virtual void publishStartNextPendingJobExecutionRequest();
+
+                    /**
+                     * \brief Recreates all Jobs subscriptions after the broker loses the MQTT session
+                     */
+                    void resubscribeAfterSessionLoss(std::uint64_t recoveryGeneration);
+
+                    /**
+                     * \brief Tracks completion of one subscription created during session recovery
+                     */
+                    Iotjobs::OnSubscribeComplete createRecoverySubscriptionCallback(
+                        std::uint64_t recoveryGeneration,
+                        std::uint8_t subscriptionMask,
+                        const char *subscriptionName);
+
+                    void completeRecoverySubscription(
+                        std::uint64_t recoveryGeneration,
+                        std::uint8_t subscriptionMask,
+                        const char *subscriptionName,
+                        int ioError);
+
+                    /**
+                     * \brief Schedules another recovery attempt after a failed subscription batch
+                     */
+                    void requestSubscriptionRecoveryRetry(std::uint64_t failedRecoveryGeneration);
+
+                    /**
+                     * \brief Starts another recovery batch if the failed attempt is still current
+                     */
+                    void retrySubscriptionRecovery(std::uint64_t failedRecoveryGeneration);
+
+                    /**
+                     * \brief Dispatches a delayed recovery task; virtual to allow deterministic tests
+                     */
+                    virtual void scheduleDelayedSubscriptionRecoveryRetry(
+                        std::function<void()> retry,
+                        std::chrono::milliseconds delay);
 
                     /**
                      * \brief Attempts to update a job execution to the provided status
@@ -226,26 +315,32 @@ namespace Aws
                         const std::function<void(void)> &onCompleteCallback);
                     /**
                      * \brief Creates a subscription to the startNextPendingJobExecution topic
+                     *
+                     * @return true when both subscription requests were queued
                      */
-                    virtual void subscribeToStartNextPendingJobExecution();
+                    virtual bool subscribeToStartNextPendingJobExecution();
                     /**
                      * \brief Creates a subscription to NextJobChangedEvents
+                     *
+                     * @return true when the subscription request was queued
                      */
-                    virtual void subscribeToNextJobChangedEvents();
+                    virtual bool subscribeToNextJobChangedEvents();
                     /**
                      * \brief Enables the Jobs feature to receive response information from the IoT Jobs service when an
                      * update is accepted
                      * @param jobId the job ID to listen for. Use "+" to subscribe for all job executions for this
                      * thing.
+                     * @return true when the subscription request was queued
                      */
-                    virtual void subscribeToUpdateJobExecutionStatusAccepted(const std::string &jobId);
+                    virtual bool subscribeToUpdateJobExecutionStatusAccepted(const std::string &jobId);
                     /**
                      * \brief Enables the Jobs feature to receive response information from the IoT Jobs service when an
                      * update is rejected
                      * @param jobId the job ID to listen for. Use "+" to subscribe for all job executions for this
                      * thing.
+                     * @return true when the subscription request was queued
                      */
-                    virtual void subscribeToUpdateJobExecutionStatusRejected(const std::string &jobId);
+                    virtual bool subscribeToUpdateJobExecutionStatusRejected(const std::string &jobId);
 
                     // Incoming Mqtt message handlers
                     /**

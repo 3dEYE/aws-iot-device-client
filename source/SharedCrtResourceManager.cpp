@@ -26,6 +26,25 @@ using namespace Aws::Iot::DeviceClient::Logging;
 constexpr int SharedCrtResourceManager::DEFAULT_WAIT_TIME_SECONDS;
 constexpr char SharedCrtResourceManager::DEFAULT_SDK_LOG_FILE[];
 
+void SharedCrtResourceManager::handleConnectionResumed(int returnCode, bool sessionPresent)
+{
+    LOGM_INFO(
+        TAG,
+        "MQTT connection resumed with return code: %d, session present: %s",
+        returnCode,
+        sessionPresent ? "true" : "false");
+
+    notifyFeaturesConnectionResumed(sessionPresent);
+}
+
+void SharedCrtResourceManager::notifyFeaturesConnectionResumed(bool sessionPresent)
+{
+    if (features != nullptr)
+    {
+        features->onConnectionResumed(sessionPresent);
+    }
+}
+
 SharedCrtResourceManager::~SharedCrtResourceManager()
 {
     if (memTraceLevel != AWS_MEMTRACE_NONE)
@@ -444,9 +463,9 @@ int SharedCrtResourceManager::establishConnection(const PlainConfig &config)
     /*
      * Invoked when connection is resumed.
      */
-    auto OnConnectionResumed = [this](const Mqtt::MqttConnection &, int returnCode, bool) {
+    auto OnConnectionResumed = [this](const Mqtt::MqttConnection &, int returnCode, bool sessionPresent) {
         {
-            LOGM_INFO(TAG, "MQTT connection resumed with return code: %d", returnCode);
+            handleConnectionResumed(returnCode, sessionPresent);
         }
     };
 
