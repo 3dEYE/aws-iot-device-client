@@ -141,7 +141,7 @@ namespace Aws
                     std::uint64_t connectionRecoveryGeneration{0};
                     size_t pendingRecoverySubscriptions{0};
                     bool connectionRecoveryFailed{false};
-                    std::uint8_t completedRecoverySubscriptions{0};
+                    std::uint8_t completedRecoverySubscriptionMask{0};
                     bool subscriptionsNeedRecovery{false};
 
                     /**

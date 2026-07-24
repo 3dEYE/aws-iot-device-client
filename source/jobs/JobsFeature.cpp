@@ -173,7 +173,7 @@ void JobsFeature::onConnectionResumed(bool sessionPresent)
         recoveryGeneration = ++connectionRecoveryGeneration;
         pendingRecoverySubscriptions = 0;
         connectionRecoveryFailed = false;
-        completedRecoverySubscriptions = 0;
+        completedRecoverySubscriptionMask = 0;
 
         if (subscriptionsNeedRecovery)
         {
@@ -315,11 +315,11 @@ void JobsFeature::completeRecoverySubscription(
             return;
         }
 
-        if (completedRecoverySubscriptions & subscriptionMask)
+        if (completedRecoverySubscriptionMask & subscriptionMask)
         {
             return;
         }
-        completedRecoverySubscriptions |= subscriptionMask;
+        completedRecoverySubscriptionMask |= subscriptionMask;
 
         if (ioError == SUBSCRIPTION_QUEUE_FAILED)
         {
@@ -988,7 +988,7 @@ void JobsFeature::runJobs()
                     recoveryGeneration = ++connectionRecoveryGeneration;
                     pendingRecoverySubscriptions = JOBS_SUBSCRIPTION_COUNT;
                     connectionRecoveryFailed = false;
-                    completedRecoverySubscriptions = 0;
+                    completedRecoverySubscriptionMask = 0;
                     recoverSubscriptions = true;
                 }
                 else
@@ -1068,7 +1068,7 @@ int JobsFeature::stop()
         ++connectionRecoveryGeneration;
         pendingRecoverySubscriptions = 0;
         connectionRecoveryFailed = false;
-        completedRecoverySubscriptions = 0;
+        completedRecoverySubscriptionMask = 0;
         subscriptionsNeedRecovery = false;
     }
     if (!handlingJob.load())
