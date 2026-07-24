@@ -74,7 +74,7 @@ namespace Aws
                         const std::string &message) = 0;
 
                     /**
-                     * \brief Sets the level of the Logger implementation (DEBUG, INFO, WARN, ERROR)
+                     * \brief Sets the level of the Logger implementation (TRACE, DEBUG, INFO, WARN, ERROR)
                      *
                      * @param level the level to set the logger to
                      */

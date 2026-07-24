@@ -129,7 +129,12 @@ namespace Aws
 
                 void TcpForward::OnReadable(struct aws_socket *, int error_code)
                 {
-                    LOGM_TRACE(TAG, "TcpForward::OnReadable error_code=%d", error_code);
+                    if (error_code)
+                    {
+                        LOGM_ERROR(TAG, "TcpForward::OnReadable error_code=%d", error_code);
+                        return;
+                    }
+                    LOG_TRACE(TAG, "TcpForward::OnReadable");
 
                     Aws::Crt::ByteBuf everything; // For cumulating everything available
                     aws_byte_buf_init(&everything, mSharedCrtResourceManager->getAllocator(), 0);

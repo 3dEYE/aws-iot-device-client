@@ -56,7 +56,7 @@ if [ "$BUILD_CONFIG" = "y" ]; then
     CONFIGURE_LOGS=""
     read -r CONFIGURE_LOGS
     if [ "$CONFIGURE_LOGS" = "y" ]; then
-      printf ${PMPT} "Specify desired log level: DEBUG/INFO/WARN/ERROR"
+      printf ${PMPT} "Specify desired log level: TRACE/DEBUG/INFO/WARN/ERROR"
       read -r LOG_LEVEL
       printf ${PMPT} "Specify log type: STDOUT for standard output, FILE for file"
       read -r LOG_TYPE

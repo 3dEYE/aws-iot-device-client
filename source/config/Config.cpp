@@ -2899,7 +2899,7 @@ void Config::PrintHelpMessage()
         "and exit "
         "program\n"
         "%s <JSON-File-Location>:\t\t\t\t\tTake settings defined in the specified JSON file and start the binary\n"
-        "%s <[DEBUG, INFO, WARN, ERROR]>:\t\t\t\tSpecify the log level for the AWS IoT Device Client\n"
+        "%s <[TRACE, DEBUG, INFO, WARN, ERROR]>:\t\t\tSpecify the log level for the AWS IoT Device Client\n"
         "%s <[STDOUT, FILE]>:\t\t\t\t\t\tSpecify the logger implementation to use.\n"
         "%s <File-Location>:\t\t\t\t\t\tWrite logs to specified log file when using the file logger.\n"
         "%s \t\t\t\t\t\t\tEnable SDK Logging.\n"

@@ -46,8 +46,16 @@ namespace
     constexpr std::uint8_t UPDATE_JOB_ACCEPTED_SUBSCRIPTION = 1U << 3U;
     constexpr std::uint8_t UPDATE_JOB_REJECTED_SUBSCRIPTION = 1U << 4U;
     constexpr int SUBSCRIPTION_QUEUE_FAILED = -1;
+    constexpr int STARTUP_SUBSCRIPTION_CANCELLED = -2;
     constexpr long SUBSCRIPTION_RECOVERY_RETRY_DELAY_MILLIS = 5 * 1000;
 } // namespace
+
+JobsFeature::~JobsFeature()
+{
+    needStop.store(true);
+    cancelStartupSubscriptionWaits();
+    joinJobsThread();
+}
 
 string JobsFeature::getName()
 {
@@ -965,21 +973,57 @@ void JobsFeature::runJobs()
 {
     LOGM_INFO(TAG, "Running %s!", getName().c_str());
 
+    std::future<int> startNextAcceptedFuture;
+    std::future<int> startNextRejectedFuture;
+    std::future<int> nextJobChangedFuture;
+    std::future<int> updateAcceptedFuture;
+    std::future<int> updateRejectedFuture;
+    bool startNextSubscriptionsQueued = false;
+    bool nextJobSubscriptionQueued = false;
+    bool updateAcceptedSubscriptionQueued = false;
+    bool updateRejectedSubscriptionQueued = false;
+    if (needStop.load())
+    {
+        return;
+    }
+
     jobsClient = createJobsClient();
 
-    auto startNextAcceptedFuture = startNextAcceptedResult.getFuture();
-    auto startNextRejectedFuture = startNextRejectedResult.getFuture();
-    auto nextJobChangedFuture = nextJobChangedResult.getFuture();
-    auto updateAcceptedFuture = updateAcceptedResult.getFuture();
-    auto updateRejectedFuture = updateRejectedResult.getFuture();
+    startNextAcceptedFuture = startNextAcceptedResult.getFuture();
+    startNextRejectedFuture = startNextRejectedResult.getFuture();
+    nextJobChangedFuture = nextJobChangedResult.getFuture();
+    updateAcceptedFuture = updateAcceptedResult.getFuture();
+    updateRejectedFuture = updateRejectedResult.getFuture();
 
-    // Create subscriptions to important MQTT topics
-    bool startNextSubscriptionsQueued = subscribeToStartNextPendingJobExecution();
-    bool nextJobSubscriptionQueued = subscribeToNextJobChangedEvents();
+    if (needStop.load())
+    {
+        return;
+    }
+
+    // Create subscriptions to important MQTT topics. Do not hold subscriptionLifecycleLock while calling the Jobs
+    // client because connection-resumed callbacks can be delivered synchronously from these calls.
+    startNextSubscriptionsQueued = subscribeToStartNextPendingJobExecution();
+    if (needStop.load())
+    {
+        return;
+    }
+    nextJobSubscriptionQueued = subscribeToNextJobChangedEvents();
+    if (needStop.load())
+    {
+        return;
+    }
 
     // We want to be notified on any response to an UpdateJobExecution call
-    bool updateAcceptedSubscriptionQueued = subscribeToUpdateJobExecutionStatusAccepted("+");
-    bool updateRejectedSubscriptionQueued = subscribeToUpdateJobExecutionStatusRejected("+");
+    updateAcceptedSubscriptionQueued = subscribeToUpdateJobExecutionStatusAccepted("+");
+    if (needStop.load())
+    {
+        return;
+    }
+    updateRejectedSubscriptionQueued = subscribeToUpdateJobExecutionStatusRejected("+");
+    if (needStop.load())
+    {
+        return;
+    }
 
     bool startupSubscriptionsReady = startNextSubscriptionsQueued && nextJobSubscriptionQueued &&
                                      updateAcceptedSubscriptionQueued && updateRejectedSubscriptionQueued;
@@ -1058,6 +1102,34 @@ void JobsFeature::runJobs()
     }
 }
 
+void JobsFeature::cancelStartupSubscriptionWaits()
+{
+    startNextAcceptedResult.complete(STARTUP_SUBSCRIPTION_CANCELLED);
+    startNextRejectedResult.complete(STARTUP_SUBSCRIPTION_CANCELLED);
+    nextJobChangedResult.complete(STARTUP_SUBSCRIPTION_CANCELLED);
+    updateAcceptedResult.complete(STARTUP_SUBSCRIPTION_CANCELLED);
+    updateRejectedResult.complete(STARTUP_SUBSCRIPTION_CANCELLED);
+}
+
+void JobsFeature::joinJobsThread()
+{
+    std::thread threadToJoin;
+    {
+        std::lock_guard<std::mutex> lock(jobsThreadLock);
+        if (!jobsThread.joinable())
+        {
+            return;
+        }
+        if (jobsThread.get_id() == std::this_thread::get_id())
+        {
+            jobsThread.detach();
+            return;
+        }
+        threadToJoin = std::move(jobsThread);
+    }
+    threadToJoin.join();
+}
+
 int JobsFeature::init(
     shared_ptr<Crt::Mqtt::MqttConnection> connection,
     shared_ptr<ClientBaseNotifier> notifier,
@@ -1086,8 +1158,12 @@ int JobsFeature::init(
 void JobsFeature::launchJobsThread()
 {
     auto self = shared_from_this();
-    thread jobs_thread([self]() { self->runJobs(); });
-    jobs_thread.detach();
+    std::lock_guard<std::mutex> lock(jobsThreadLock);
+    if (needStop.load())
+    {
+        return;
+    }
+    jobsThread = thread([self]() { self->runJobs(); });
 }
 
 int JobsFeature::start()
@@ -1107,17 +1183,19 @@ int JobsFeature::start()
 
 int JobsFeature::stop()
 {
+    needStop.store(true);
     {
         std::lock_guard<std::mutex> subscriptionLifecycleGuard(subscriptionLifecycleLock);
         std::lock_guard<std::mutex> lock(connectionRecoveryLock);
-        needStop.store(true);
         jobsClientReady = false;
         ++connectionRecoveryGeneration;
         pendingRecoverySubscriptions = 0;
         connectionRecoveryFailed = false;
         completedRecoverySubscriptionMask = 0;
         subscriptionsNeedRecovery = false;
+        cancelStartupSubscriptionWaits();
     }
+    joinJobsThread();
     if (!handlingJob.load())
     {
         baseNotifier->onEvent(static_cast<Feature *>(this), ClientBaseEventNotification::FEATURE_STOPPED);

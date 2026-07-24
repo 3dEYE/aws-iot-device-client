@@ -27,7 +27,7 @@ namespace Aws
                 {
                   private:
                     /**
-                     * \brief The LogLevel [DEBUG, INFO, WARN, ERROR]
+                     * \brief The LogLevel [TRACE, DEBUG, INFO, WARN, ERROR]
                      */
                     LogLevel level;
                     /**

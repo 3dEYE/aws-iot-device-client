@@ -19,12 +19,16 @@ namespace Aws
                 // Client callback
                 using OnTcpForwardDataReceive = std::function<void(const Crt::ByteBuf &data)>;
 
+                class TcpForwardTestAccess;
+
                 /**
                  * \brief A class that represents a local TCP socket. It implements all callbacks required by using
                  * aws_socket.
                  */
                 class TcpForward
                 {
+                    friend class TcpForwardTestAccess;
+
                   public:
                     /**
                      * \brief Constructor

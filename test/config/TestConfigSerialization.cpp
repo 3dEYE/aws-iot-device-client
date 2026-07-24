@@ -30,7 +30,7 @@ TEST(SerializeConfigTestFixture, SerializeCompleteConfigTest)
     "key": "/tmp/aws-iot-device-client-test-file",
     "thing-name": "thing-name value",
     "logging": {
-        "level": "INFO",
+        "level": "TRACE",
         "type": "file",
         "file": "./aws-iot-device-client.log",
         "enable-sdk-logging": false,
