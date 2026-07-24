@@ -4,6 +4,7 @@
 #include "../../source/tunneling/TcpForward.h"
 
 #include "gtest/gtest.h"
+#include <aws/common/allocator.h>
 
 using namespace std;
 using namespace Aws::Iot::DeviceClient;
@@ -37,6 +38,49 @@ namespace Aws
     }         // namespace Iot
 } // namespace Aws
 
+namespace
+{
+    class TestCrtResourceManager : public SharedCrtResourceManager
+    {
+      public:
+        aws_allocator *getAllocator() override { return aws_default_allocator(); }
+    };
+
+    class BufferedReadTcpForward : public TcpForward
+    {
+      public:
+        BufferedReadTcpForward(
+            const shared_ptr<SharedCrtResourceManager> &resourceManager,
+            const string &bufferedData)
+            : TcpForward(resourceManager, 0), bufferedData(bufferedData)
+        {
+        }
+
+        int ReadSocket(aws_byte_buf *buffer, size_t *amountRead) override
+        {
+            ++readCallCount;
+            if (!dataRead)
+            {
+                const auto *data = reinterpret_cast<const uint8_t *>(bufferedData.data());
+                aws_byte_buf_write(buffer, data, bufferedData.size());
+                *amountRead = bufferedData.size();
+                dataRead = true;
+                return AWS_OP_SUCCESS;
+            }
+
+            *amountRead = 0;
+            return aws_raise_error(AWS_IO_SOCKET_CLOSED);
+        }
+
+        size_t getReadCallCount() const { return readCallCount; }
+
+      private:
+        string bufferedData;
+        bool dataRead{false};
+        size_t readCallCount{0};
+    };
+} // namespace
+
 TEST(TcpForward, ReadableSocketErrorDoesNotForwardData)
 {
     auto resourceManager = make_shared<SharedCrtResourceManager>();
@@ -48,4 +92,23 @@ TEST(TcpForward, ReadableSocketErrorDoesNotForwardData)
     TcpForwardTestAccess::invokeOnReadable(tcpForward, AWS_IO_SOCKET_NOT_CONNECTED);
 
     EXPECT_EQ(0U, receiveCallbackCount);
+}
+
+TEST(TcpForward, PeerCloseDrainsBufferedDataBeforeReturning)
+{
+    auto resourceManager = make_shared<TestCrtResourceManager>();
+    BufferedReadTcpForward tcpForward(resourceManager, "tail");
+    size_t receiveCallbackCount = 0;
+    string forwardedData;
+    TcpForwardTestAccess::setDataReceiveCallback(
+        tcpForward, [&receiveCallbackCount, &forwardedData](const Aws::Crt::ByteBuf &data) {
+            ++receiveCallbackCount;
+            forwardedData.assign(reinterpret_cast<const char *>(data.buffer), data.len);
+        });
+
+    TcpForwardTestAccess::invokeOnReadable(tcpForward, AWS_IO_SOCKET_CLOSED);
+
+    EXPECT_EQ(1U, receiveCallbackCount);
+    EXPECT_EQ("tail", forwardedData);
+    EXPECT_EQ(2U, tcpForward.getReadCallCount());
 }

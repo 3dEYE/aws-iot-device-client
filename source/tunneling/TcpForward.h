@@ -103,6 +103,11 @@ namespace Aws
                     void OnConnectionResult(struct aws_socket *socket, int error_code);
 
                     /**
+                     * \brief Wrapper around aws_socket_read
+                     */
+                    virtual int ReadSocket(aws_byte_buf *buffer, size_t *amountRead);
+
+                    /**
                      * \brief Callback when writing to the socket is complete
                      */
                     void OnWriteCompleted(struct aws_socket *socket, int error_code, size_t bytes_written) const;
