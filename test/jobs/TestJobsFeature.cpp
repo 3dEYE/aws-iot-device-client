@@ -860,6 +860,87 @@ TEST_F(TestJobsFeature, SubscriptionRecoveryCallbacksAfterStopAreIgnored)
     callbacks.updateJobRejected(0);
 }
 
+TEST_F(TestJobsFeature, StopWaitsForSubscriptionRecoveryToFinishQueueing)
+{
+    expectSuccessfulJobsStartup(*jobsMock, mockClient, ThingName);
+    jobsMock->init(std::shared_ptr<Mqtt::MqttConnection>(), notifier, config);
+    jobsMock->invokeRunJobs();
+    Mock::VerifyAndClearExpectations(mockClient.get());
+
+    promise<void> recoverySubscribeEntered;
+    future<void> recoverySubscribeEnteredFuture = recoverySubscribeEntered.get_future();
+    promise<void> allowRecoverySubscribe;
+    shared_future<void> allowRecoverySubscribeFuture = allowRecoverySubscribe.get_future().share();
+    promise<void> stopStarted;
+    future<void> stopStartedFuture = stopStarted.get_future();
+    promise<void> stopCompleted;
+    future<void> stopCompletedFuture = stopCompleted.get_future();
+
+    EXPECT_CALL(
+        *mockClient,
+        SubscribeToStartNextPendingJobExecutionAccepted(
+            ThingNameEq(ThingName), AWS_MQTT_QOS_AT_LEAST_ONCE, _, _))
+        .Times(1)
+        .WillOnce(DoAll(
+            InvokeWithoutArgs([&]() {
+                recoverySubscribeEntered.set_value();
+                allowRecoverySubscribeFuture.wait();
+            }),
+            Return(true)));
+    EXPECT_CALL(
+        *mockClient,
+        SubscribeToStartNextPendingJobExecutionRejected(
+            ThingNameEq(ThingName), AWS_MQTT_QOS_AT_LEAST_ONCE, _, _))
+        .Times(1)
+        .WillOnce(Return(true));
+    EXPECT_CALL(
+        *mockClient,
+        SubscribeToNextJobExecutionChangedEvents(ThingNameEq(ThingName), AWS_MQTT_QOS_AT_LEAST_ONCE, _, _))
+        .Times(1)
+        .WillOnce(Return(true));
+    EXPECT_CALL(
+        *mockClient,
+        SubscribeToUpdateJobExecutionAccepted(ThingNameEq(ThingName), AWS_MQTT_QOS_AT_LEAST_ONCE, _, _))
+        .Times(1)
+        .WillOnce(Return(true));
+    EXPECT_CALL(
+        *mockClient,
+        SubscribeToUpdateJobExecutionRejected(ThingNameEq(ThingName), AWS_MQTT_QOS_AT_LEAST_ONCE, _, _))
+        .Times(1)
+        .WillOnce(Return(true));
+    EXPECT_CALL(*mockClient, PublishStartNextPendingJobExecution(_, _, _)).Times(0);
+    EXPECT_CALL(*jobsMock, publishUpdateJobExecutionStatusWithRetry(_, _, _, _)).Times(0);
+    EXPECT_CALL(*notifier, onEvent(jobsMock.get(), ClientBaseEventNotification::FEATURE_STOPPED)).Times(1);
+
+    thread recoveryThread([&]() { jobsMock->onConnectionResumed(false); });
+    if (future_status::ready != recoverySubscribeEnteredFuture.wait_for(chrono::seconds(1)))
+    {
+        allowRecoverySubscribe.set_value();
+        recoveryThread.join();
+        FAIL() << "Recovery subscription did not start";
+    }
+
+    thread stopThread([&]() {
+        stopStarted.set_value();
+        jobsMock->stop();
+        stopCompleted.set_value();
+    });
+    if (future_status::ready != stopStartedFuture.wait_for(chrono::seconds(1)))
+    {
+        allowRecoverySubscribe.set_value();
+        recoveryThread.join();
+        stopThread.join();
+        FAIL() << "Feature stop did not start";
+    }
+    EXPECT_EQ(future_status::timeout, stopCompletedFuture.wait_for(chrono::seconds(1)));
+
+    allowRecoverySubscribe.set_value();
+    recoveryThread.join();
+    stopThread.join();
+
+    EXPECT_EQ(future_status::ready, stopCompletedFuture.wait_for(chrono::seconds(0)));
+}
+
 TEST_F(TestJobsFeature, ExecuteJobHappy)
 {
     /**

@@ -138,7 +138,9 @@ void JobsFeature::publishStartNextPendingJobExecutionRequest()
 
 void JobsFeature::onConnectionResumed(bool sessionPresent)
 {
+    std::lock_guard<std::mutex> subscriptionLifecycleGuard(subscriptionLifecycleLock);
     std::uint64_t recoveryGeneration;
+    bool recoverSubscriptions = false;
     {
         std::lock_guard<std::mutex> lock(connectionRecoveryLock);
         if (needStop.load())
@@ -161,14 +163,18 @@ void JobsFeature::onConnectionResumed(bool sessionPresent)
         connectionRecoveryFailed = false;
         completedRecoverySubscriptions = 0;
 
-        if (!subscriptionsNeedRecovery)
+        if (subscriptionsNeedRecovery)
         {
-            LOG_INFO(TAG, "MQTT connection resumed with the existing session; checking for pending AWS IoT Jobs");
-            publishStartNextPendingJobExecutionRequest();
-            return;
+            pendingRecoverySubscriptions = JOBS_SUBSCRIPTION_COUNT;
+            recoverSubscriptions = true;
         }
+    }
 
-        pendingRecoverySubscriptions = JOBS_SUBSCRIPTION_COUNT;
+    if (!recoverSubscriptions)
+    {
+        LOG_INFO(TAG, "MQTT connection resumed with the existing session; checking for pending AWS IoT Jobs");
+        publishStartNextPendingJobExecutionRequest();
+        return;
     }
 
     LOG_INFO(TAG, "Recreating AWS IoT Jobs subscriptions after interrupted or lost MQTT session recovery");
@@ -895,31 +901,39 @@ void JobsFeature::runJobs()
     subscribeToUpdateJobExecutionStatusRejected("+");
 
     bool recoverSubscriptions = false;
+    bool pollPendingJobs = false;
     std::uint64_t recoveryGeneration = 0;
     {
-        std::lock_guard<std::mutex> lock(connectionRecoveryLock);
-        if (!needStop.load())
+        std::lock_guard<std::mutex> subscriptionLifecycleGuard(subscriptionLifecycleLock);
         {
-            jobsClientReady = true;
-            if (subscriptionsNeedRecovery)
+            std::lock_guard<std::mutex> lock(connectionRecoveryLock);
+            if (!needStop.load())
             {
-                recoveryGeneration = ++connectionRecoveryGeneration;
-                pendingRecoverySubscriptions = JOBS_SUBSCRIPTION_COUNT;
-                connectionRecoveryFailed = false;
-                completedRecoverySubscriptions = 0;
-                recoverSubscriptions = true;
-            }
-            else
-            {
-                publishStartNextPendingJobExecutionRequest();
+                jobsClientReady = true;
+                if (subscriptionsNeedRecovery)
+                {
+                    recoveryGeneration = ++connectionRecoveryGeneration;
+                    pendingRecoverySubscriptions = JOBS_SUBSCRIPTION_COUNT;
+                    connectionRecoveryFailed = false;
+                    completedRecoverySubscriptions = 0;
+                    recoverSubscriptions = true;
+                }
+                else
+                {
+                    pollPendingJobs = true;
+                }
             }
         }
-    }
 
-    if (recoverSubscriptions)
-    {
-        LOG_INFO(TAG, "Recreating AWS IoT Jobs subscriptions after MQTT session loss during startup");
-        resubscribeAfterSessionLoss(recoveryGeneration);
+        if (recoverSubscriptions)
+        {
+            LOG_INFO(TAG, "Recreating AWS IoT Jobs subscriptions after MQTT session loss during startup");
+            resubscribeAfterSessionLoss(recoveryGeneration);
+        }
+        else if (pollPendingJobs)
+        {
+            publishStartNextPendingJobExecutionRequest();
+        }
     }
 }
 
@@ -960,6 +974,7 @@ int JobsFeature::start()
 int JobsFeature::stop()
 {
     {
+        std::lock_guard<std::mutex> subscriptionLifecycleGuard(subscriptionLifecycleLock);
         std::lock_guard<std::mutex> lock(connectionRecoveryLock);
         needStop.store(true);
         jobsClientReady = false;

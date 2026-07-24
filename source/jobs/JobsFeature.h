@@ -123,6 +123,10 @@ namespace Aws
                      * \brief Whether the jobs feature is currently executing a job
                      */
                     std::atomic<bool> handlingJob{false};
+                    /**
+                     * \brief Serializes subscription recovery with feature shutdown
+                     */
+                    std::mutex subscriptionLifecycleLock;
                     std::mutex connectionRecoveryLock;
                     bool jobsClientReady{false};
                     std::uint64_t connectionRecoveryGeneration{0};
