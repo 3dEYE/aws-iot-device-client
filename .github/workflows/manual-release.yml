@@ -21,7 +21,7 @@ permissions:
 
 env:
   PACKAGE_NAME: aws-iot-device-client
-  ECR_BASE_REPO: aws-iot-device-client/aws-iot-device-client-base-images
+  LOCAL_BUILD_IMAGE: aws-iot-device-client-release-builder:local
 
 jobs:
   version:
@@ -64,17 +64,14 @@ jobs:
       matrix:
         include:
           - architecture: x64
-            docker_image: x86_64-ubuntu-latest
             build_args: ""
             binary_path: build/aws-iot-device-client
             asset_name: aws-iot-device-client-linux-x64
           - architecture: arm32
-            docker_image: x86_64-ubuntu-latest
             build_args: --compile-mode=armhf_cross_mode
             binary_path: build/aws-iot-device-client
             asset_name: aws-iot-device-client-linux-arm32
           - architecture: arm64
-            docker_image: x86_64-ubuntu-latest
             build_args: --compile-mode=aarch64_cross_mode
             binary_path: build/aws-iot-device-client
             asset_name: aws-iot-device-client-linux-arm64
@@ -92,12 +89,15 @@ jobs:
         run: |
           set -euo pipefail
 
-          docker_image="public.ecr.aws/${ECR_BASE_REPO}:${{ matrix.docker_image }}"
-          docker pull "$docker_image"
+          docker build \
+            --file .github/docker-images/base-images/device-client/ubuntu/Dockerfile \
+            --target base \
+            --tag "$LOCAL_BUILD_IMAGE" \
+            .
           docker run \
             --mount "type=bind,source=$(pwd),target=/root/${PACKAGE_NAME}" \
             --env GITHUB_REF=refs/heads/${RELEASE_BRANCH} \
-            "$docker_image" \
+            "$LOCAL_BUILD_IMAGE" \
             ${{ matrix.build_args }}
 
       - name: Stage release asset
