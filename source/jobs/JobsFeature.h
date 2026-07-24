@@ -89,6 +89,10 @@ namespace Aws
                      */
                     void runJobs();
                     /**
+                     * \brief Launches the Jobs startup thread
+                     */
+                    virtual void launchJobsThread();
+                    /**
                      * \brief An enum used for UpdateJobExecution responses
                      */
                     enum UpdateJobExecutionResponseType
@@ -120,6 +124,10 @@ namespace Aws
                      * \brief Whether the DeviceClient base has requested this feature to stop
                      */
                     std::atomic<bool> needStop{false};
+                    /**
+                     * \brief Ensures this single-use feature launches its startup thread only once
+                     */
+                    std::atomic<bool> startRequested{false};
                     /**
                      * \brief Whether the jobs feature is currently executing a job
                      */

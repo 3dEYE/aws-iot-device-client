@@ -1037,10 +1037,22 @@ int JobsFeature::init(
     return 0;
 }
 
-int JobsFeature::start()
+void JobsFeature::launchJobsThread()
 {
     thread jobs_thread(&JobsFeature::runJobs, this);
     jobs_thread.detach();
+}
+
+int JobsFeature::start()
+{
+    bool expected = false;
+    if (!startRequested.compare_exchange_strong(expected, true))
+    {
+        LOG_WARN(TAG, "Ignoring duplicate request to start the Jobs feature");
+        return 0;
+    }
+
+    launchJobsThread();
 
     baseNotifier->onEvent(static_cast<Feature *>(this), ClientBaseEventNotification::FEATURE_STARTED);
     return 0;

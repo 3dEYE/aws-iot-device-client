@@ -252,6 +252,7 @@ class MockJobsFeature : public JobsFeature
   public:
     MockJobsFeature() : JobsFeature() {}
     void invokeRunJobs() { this->runJobs(); }
+    MOCK_METHOD(void, launchJobsThread, (), (override));
     MOCK_METHOD(shared_ptr<AbstractIotJobsClient>, createJobsClient, (), (override));
     MOCK_METHOD(shared_ptr<JobEngine>, createJobEngine, (), (override));
     MOCK_METHOD(
@@ -442,6 +443,16 @@ TEST_F(TestJobsFeature, Init)
      * Test init Jobs with null MqttConnection, Mock notifier, and PlainConfig
      */
     ASSERT_EQ(0, jobsMock->init(std::shared_ptr<Mqtt::MqttConnection>(), notifier, config));
+}
+
+TEST_F(TestJobsFeature, RepeatedStartDoesNotLaunchAnotherJobsThread)
+{
+    EXPECT_CALL(*jobsMock, launchJobsThread()).Times(1);
+    EXPECT_CALL(*notifier, onEvent(jobsMock.get(), ClientBaseEventNotification::FEATURE_STARTED)).Times(1);
+
+    jobsMock->init(std::shared_ptr<Mqtt::MqttConnection>(), notifier, config);
+    EXPECT_EQ(0, jobsMock->start());
+    EXPECT_EQ(0, jobsMock->start());
 }
 
 TEST_F(TestJobsFeature, RunJobsHappy)
