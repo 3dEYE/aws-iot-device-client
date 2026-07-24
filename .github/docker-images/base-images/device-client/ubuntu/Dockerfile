@@ -26,7 +26,7 @@ WORKDIR /tmp
 RUN wget https://www.openssl.org/source/openssl-${OPENSSL_VERSION}.tar.gz \
     && tar -zxvf openssl-${OPENSSL_VERSION}.tar.gz \
     && cd openssl-${OPENSSL_VERSION} \
-    && ./config \
+    && ./config --libdir=lib \
     && make \
     && make install \
     && ldconfig
@@ -91,7 +91,11 @@ RUN mkdir sdk-cpp-workspace \
     && cd .. \
     && mkdir aws-iot-device-sdk-cpp-v2-build \
     && cd aws-iot-device-sdk-cpp-v2-build \
-    && cmake -DCMAKE_INSTALL_PREFIX="/usr" -DUSE_OPENSSL=ON -DBUILD_DEPS=ON ../aws-iot-device-sdk-cpp-v2 \
+    && cmake -DCMAKE_INSTALL_PREFIX="/usr" \
+        -DOPENSSL_ROOT_DIR="/usr/local" \
+        -DUSE_OPENSSL=ON \
+        -DBUILD_DEPS=ON \
+        ../aws-iot-device-sdk-cpp-v2 \
     && cmake --build . --target install
 
 COPY ./.github/docker-images/oss-compliance /root/oss-compliance
