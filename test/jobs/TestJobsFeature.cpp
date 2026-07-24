@@ -16,6 +16,8 @@
 #include <aws/iotjobs/RejectedError.h>
 #include <aws/iotjobs/StartNextJobExecutionResponse.h>
 #include <aws/iotjobs/UpdateJobExecutionResponse.h>
+#include <chrono>
+#include <thread>
 
 using namespace std;
 using namespace testing;
