@@ -25,9 +25,10 @@ env:
 
 jobs:
   version:
-    name: Read release version
+    name: Resolve release revision and version
     runs-on: ubuntu-latest
     outputs:
+      commit_sha: ${{ steps.revision.outputs.commit_sha }}
       version: ${{ steps.version.outputs.version }}
     steps:
       - name: Checkout release branch
@@ -36,20 +37,28 @@ jobs:
           ref: ${{ inputs.release_branch }}
           fetch-depth: 0
 
-      - name: Read version from .version
+      - name: Pin release revision
+        id: revision
+        shell: bash
+        run: echo "commit_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Derive version from release revision
         id: version
         shell: bash
         run: |
           set -euo pipefail
 
-          if [[ ! -s .version ]]; then
-            echo ".version is missing or empty" >&2
-            exit 1
-          fi
+          version_tag=$(git describe --abbrev=0 --tags --match 'v[0-9]*')
+          version_numbers=${version_tag#v}
+          major=${version_numbers%%.*}
+          minor_and_suffix=${version_numbers#*.}
+          minor=${minor_and_suffix%%[^0-9]*}
+          patch=$(git rev-list "${version_tag}..HEAD" --count)
+          git_sha=$(git rev-parse --short HEAD)
+          version="v${major}.${minor}.${patch}-${git_sha}"
 
-          version=$(cut -d'*' -f1 .version | tr -d '[:space:]')
-          if [[ -z "$version" ]]; then
-            echo "Unable to read release version from .version" >&2
+          if [[ ! "$major" =~ ^[0-9]+$ || ! "$minor" =~ ^[0-9]+$ ]]; then
+            echo "Unable to derive release version from tag: $version_tag" >&2
             exit 1
           fi
 
@@ -79,7 +88,7 @@ jobs:
       - name: Checkout release branch
         uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.release_branch }}
+          ref: ${{ needs.version.outputs.commit_sha }}
           fetch-depth: 0
 
       - name: Build binary
@@ -126,7 +135,7 @@ jobs:
       - name: Checkout release branch
         uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.release_branch }}
+          ref: ${{ needs.version.outputs.commit_sha }}
           fetch-depth: 0
 
       - name: Download release assets
@@ -139,6 +148,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_BRANCH: ${{ inputs.release_branch }}
+          RELEASE_SHA: ${{ needs.version.outputs.commit_sha }}
           VERSION: ${{ needs.version.outputs.version }}
         shell: bash
         run: |
@@ -146,6 +156,6 @@ jobs:
 
           gh release create "$VERSION" \
             release-assets/* \
-            --target "$RELEASE_BRANCH" \
+            --target "$RELEASE_SHA" \
             --title "$VERSION" \
-            --notes "Release built from the ${RELEASE_BRANCH} branch."
+            --notes "Release built from commit ${RELEASE_SHA} on the ${RELEASE_BRANCH} branch."
