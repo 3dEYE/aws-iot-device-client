@@ -239,23 +239,25 @@ namespace Aws
                 {
                     SubscribeToTunnelsNotifyRequest request;
                     request.ThingName = mThingName.c_str();
+                    weak_ptr<SecureTunnelingFeature> weakSelf = shared_from_this();
 
                     bool queued = iotSecureTunnelingClient->SubscribeToTunnelsNotify(
                         request,
                         AWS_MQTT_QOS_AT_LEAST_ONCE,
-                        bind(
-                            &SecureTunnelingFeature::OnSubscribeToTunnelsNotifyResponse,
-                            this,
-                            placeholders::_1,
-                            placeholders::_2,
-                            isRecovery,
-                            recoveryGeneration),
-                        bind(
-                            &SecureTunnelingFeature::OnSubscribeComplete,
-                            this,
-                            placeholders::_1,
-                            isRecovery,
-                            recoveryGeneration));
+                        [weakSelf, recoveryGeneration](SecureTunnelingNotifyResponse *response, int ioErr) {
+                            auto self = weakSelf.lock();
+                            if (self)
+                            {
+                                self->OnSubscribeToTunnelsNotifyResponse(response, ioErr, recoveryGeneration);
+                            }
+                        },
+                        [weakSelf, isRecovery, recoveryGeneration](int ioErr) {
+                            auto self = weakSelf.lock();
+                            if (self)
+                            {
+                                self->OnSubscribeComplete(ioErr, isRecovery, recoveryGeneration);
+                            }
+                        });
 
                     if (!queued)
                     {
@@ -281,14 +283,16 @@ namespace Aws
                 void SecureTunnelingFeature::OnSubscribeToTunnelsNotifyResponse(
                     SecureTunnelingNotifyResponse *response,
                     int ioErr,
-                    bool isRecovery,
-                    std::uint64_t recoveryGeneration)
+                    std::uint64_t subscriptionGeneration)
                 {
-                    lock_guard<mutex> lock(mConnectionRecoveryLock);
-                    if (!mStarted || (isRecovery && recoveryGeneration != mConnectionRecoveryGeneration))
+                    lock_guard<mutex> notificationLock(mTunnelNotificationLock);
                     {
-                        LOG_DEBUG(TAG, "Ignoring stale tunnel notification");
-                        return;
+                        lock_guard<mutex> lock(mConnectionRecoveryLock);
+                        if (!mStarted || subscriptionGeneration != mConnectionRecoveryGeneration)
+                        {
+                            LOG_DEBUG(TAG, "Ignoring stale tunnel notification");
+                            return;
+                        }
                     }
 
                     LOG_DEBUG(TAG, "Received MQTT Tunnel Notification");
@@ -297,15 +301,6 @@ namespace Aws
                     {
                         LOGM_ERROR(TAG, "OnSubscribeToTunnelsNotifyResponse received error. ioErr=%d", ioErr);
                         return;
-                    }
-
-                    for (auto &c : mContexts)
-                    {
-                        if (c->IsDuplicateNotification(*response))
-                        {
-                            LOG_INFO(TAG, "Received duplicate MQTT Tunnel Notification. Ignoring...");
-                            return;
-                        }
                     }
 
                     string clientMode = response->ClientMode->c_str();
@@ -351,14 +346,41 @@ namespace Aws
                         return;
                     }
 
+                    {
+                        lock_guard<mutex> lock(mConnectionRecoveryLock);
+                        if (!mStarted || subscriptionGeneration != mConnectionRecoveryGeneration)
+                        {
+                            LOG_DEBUG(TAG, "Ignoring stale tunnel notification");
+                            return;
+                        }
+
+                        for (auto &c : mContexts)
+                        {
+                            if (c->IsDuplicateNotification(*response))
+                            {
+                                LOG_INFO(TAG, "Received duplicate MQTT Tunnel Notification. Ignoring...");
+                                return;
+                            }
+                        }
+                    }
+
                     LOGM_DEBUG(TAG, "Region=%s, Service=%s", region.c_str(), service.c_str());
 
                     auto context = createContext(accessToken, region, port);
 
-                    if (context->ConnectToSecureTunnel())
+                    if (!context->ConnectToSecureTunnel())
                     {
-                        mContexts.push_back(std::move(context));
+                        return;
                     }
+
+                    lock_guard<mutex> lock(mConnectionRecoveryLock);
+                    if (!mStarted || subscriptionGeneration != mConnectionRecoveryGeneration)
+                    {
+                        LOG_DEBUG(TAG, "Discarding tunnel opened by a stale notification");
+                        return;
+                    }
+
+                    mContexts.push_back(std::move(context));
                 }
 
                 void SecureTunnelingFeature::OnSubscribeComplete(

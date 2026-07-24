@@ -75,6 +75,33 @@ class FakeSecureTunnelContext : public SecureTunnelingContext
     bool IsDuplicateNotification(const SecureTunnelingNotifyResponse &response) override { return true; }
 };
 
+struct BlockingSecureTunnelContextState
+{
+    shared_ptr<promise<void>> connectEntered;
+    shared_future<void> allowConnect;
+    shared_ptr<promise<void>> destroyed;
+};
+
+class BlockingSecureTunnelContext : public SecureTunnelingContext
+{
+  public:
+    explicit BlockingSecureTunnelContext(const shared_ptr<BlockingSecureTunnelContextState> &state) : state(state) {}
+    ~BlockingSecureTunnelContext() override { state->destroyed->set_value(); }
+
+    bool ConnectToSecureTunnel() override
+    {
+        state->connectEntered->set_value();
+        state->allowConnect.wait();
+        return true;
+    }
+
+    void StopSecureTunnel() override {}
+    bool IsDuplicateNotification(const SecureTunnelingNotifyResponse &) override { return false; }
+
+  private:
+    shared_ptr<BlockingSecureTunnelContextState> state;
+};
+
 class MockSecureTunnelingFeature : public SecureTunnelingFeature
 {
   public:
@@ -398,6 +425,83 @@ TEST_F(TestSecureTunnelingFeature, TunnelNotificationAfterStopIsIgnored)
 
     ASSERT_TRUE(static_cast<bool>(notificationHandler));
     notificationHandler(response.get(), 0);
+}
+
+TEST_F(TestSecureTunnelingFeature, StopDoesNotWaitForTunnelConnectionAndDiscardsStaleContext)
+{
+    string accessToken = "12345";
+    string region = "us-west-2";
+    uint16_t port = 22;
+    Aws::Crt::Vector<Aws::Crt::String> services;
+    services.push_back("SSH");
+
+    response->ClientMode = "destination";
+    response->Services = services;
+    response->ClientAccessToken = accessToken.c_str();
+    response->Region = region.c_str();
+
+    auto connectEntered = make_shared<promise<void>>();
+    auto connectEnteredFuture = connectEntered->get_future();
+    auto allowConnect = make_shared<promise<void>>();
+    auto allowConnectFuture = allowConnect->get_future().share();
+    auto contextDestroyed = make_shared<promise<void>>();
+    auto contextDestroyedFuture = contextDestroyed->get_future();
+    auto contextState = make_shared<BlockingSecureTunnelContextState>(
+        BlockingSecureTunnelContextState{connectEntered, allowConnectFuture, contextDestroyed});
+    unique_ptr<SecureTunnelingContext> blockingContext(new BlockingSecureTunnelContext(contextState));
+
+    Iotsecuretunneling::OnSubscribeToTunnelsNotifyResponse notificationHandler;
+    promise<void> stopCompleted;
+    future<void> stopCompletedFuture = stopCompleted.get_future();
+
+    EXPECT_CALL(*secureTunnelingFeature, createContext(StrEq(accessToken), StrEq(region), Eq(port)))
+        .Times(1)
+        .WillOnce(Return(ByMove(std::move(blockingContext))));
+    EXPECT_CALL(*secureTunnelingFeature, createClient()).Times(1).WillOnce(Return(mockClient));
+    EXPECT_CALL(*mockClient, SubscribeToTunnelsNotify(ThingNameEq(thingName), AWS_MQTT_QOS_AT_LEAST_ONCE, _, _))
+        .Times(1)
+        .WillOnce(DoAll(SaveArg<2>(&notificationHandler), InvokeArgument<3>(0), Return(true)));
+    EXPECT_CALL(*notifier, onEvent(secureTunnelingFeature.get(), ClientBaseEventNotification::FEATURE_STARTED))
+        .Times(1);
+    EXPECT_CALL(*notifier, onEvent(secureTunnelingFeature.get(), ClientBaseEventNotification::FEATURE_STOPPED))
+        .Times(1);
+
+    secureTunnelingFeature->init(manager, notifier, config);
+    secureTunnelingFeature->start();
+    ASSERT_TRUE(static_cast<bool>(notificationHandler));
+
+    weak_ptr<MockSecureTunnelingFeature> weakFeature = secureTunnelingFeature;
+    thread notificationThread([&]() { notificationHandler(response.get(), 0); });
+    if (future_status::ready != connectEnteredFuture.wait_for(chrono::seconds(3)))
+    {
+        allowConnect->set_value();
+        notificationThread.join();
+        secureTunnelingFeature->stop();
+        FAIL() << "Tunnel connection did not start";
+    }
+
+    auto feature = secureTunnelingFeature.get();
+    thread stopThread([&]() {
+        feature->stop();
+        stopCompleted.set_value();
+    });
+    if (future_status::ready != stopCompletedFuture.wait_for(chrono::seconds(3)))
+    {
+        allowConnect->set_value();
+        notificationThread.join();
+        stopThread.join();
+        FAIL() << "Feature stop waited for the tunnel connection";
+    }
+    stopThread.join();
+
+    secureTunnelingFeature.reset();
+    EXPECT_FALSE(weakFeature.expired());
+
+    allowConnect->set_value();
+    notificationThread.join();
+
+    EXPECT_EQ(future_status::ready, contextDestroyedFuture.wait_for(chrono::seconds(0)));
+    EXPECT_TRUE(weakFeature.expired());
 }
 
 TEST_F(TestSecureTunnelingFeature, CleanSessionDoesNotSubscribeWhenTunnelNotificationsAreDisabled)

@@ -13,6 +13,7 @@
 #include <aws/iotdevicecommon/IotDevice.h>
 #include <aws/iotsecuretunneling/SecureTunnelingNotifyResponse.h>
 #include <cstdint>
+#include <memory>
 #include <mutex>
 
 namespace Aws
@@ -26,7 +27,9 @@ namespace Aws
                 /**
                  * \brief Provides IoT Secure Tunneling related functionality within the Device Client
                  */
-                class SecureTunnelingFeature : public Feature
+                class SecureTunnelingFeature
+                    : public Feature,
+                      public std::enable_shared_from_this<SecureTunnelingFeature>
                 {
                   public:
                     static constexpr char NAME[] = "Secure Tunneling";
@@ -107,14 +110,12 @@ namespace Aws
                      *
                      * @param response MQTT new tunnel notification
                      * @param ioErr error code
-                     * @param isRecovery true when the handler belongs to a recovery subscription
-                     * @param recoveryGeneration identifies the recovery attempt that registered the handler
+                     * @param subscriptionGeneration identifies the subscription that registered the handle
                      */
                     void OnSubscribeToTunnelsNotifyResponse(
                         Aws::Iotsecuretunneling::SecureTunnelingNotifyResponse *response,
                         int ioErr,
-                        bool isRecovery,
-                        std::uint64_t recoveryGeneration);
+                        std::uint64_t subscriptionGeneration);
 
                     /**
                      * \brief Callback when subscribe to MQTT new tunnel notification is complete
@@ -225,6 +226,11 @@ namespace Aws
                      * \brief Serializes recovery subscription queueing with lifecycle shutdown
                      */
                     std::mutex mSubscriptionLifecycleLock;
+
+                    /**
+                     * \brief Serializes tunnel notification processing without blocking lifecycle shutdown
+                     */
+                    std::mutex mTunnelNotificationLock;
 
                     /**
                      * \brief True while the feature is running and can restore its MQTT subscription
