@@ -18,6 +18,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <functional>
 #include <future>
 #include <memory>
 #include <mutex>
@@ -222,6 +223,19 @@ namespace Aws
                     void ackSubscribeToUpdateJobExecutionRejected(int ioError);
                     void reportSubscriptionQueueFailure(const char *subscriptionName);
 
+                    template <typename... Args>
+                    std::function<void(Args...)> createWeakCallback(void (JobsFeature::*handler)(Args...))
+                    {
+                        std::weak_ptr<JobsFeature> weakSelf = shared_from_this();
+                        return [weakSelf, handler](Args... args) {
+                            auto self = weakSelf.lock();
+                            if (self)
+                            {
+                                ((*self).*handler)(args...);
+                            }
+                        };
+                    }
+
                     struct StartupSubscriptionResult
                     {
                         std::promise<int> result;
@@ -254,6 +268,11 @@ namespace Aws
                     /**
                      * \brief Tracks completion of one subscription created during session recovery
                      */
+                    Iotjobs::OnSubscribeComplete createRecoverySubscriptionCallback(
+                        std::uint64_t recoveryGeneration,
+                        std::uint8_t subscriptionMask,
+                        const char *subscriptionName);
+
                     void completeRecoverySubscription(
                         std::uint64_t recoveryGeneration,
                         std::uint8_t subscriptionMask,

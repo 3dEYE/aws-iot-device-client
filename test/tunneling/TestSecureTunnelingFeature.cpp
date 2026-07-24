@@ -427,6 +427,83 @@ TEST_F(TestSecureTunnelingFeature, TunnelNotificationAfterStopIsIgnored)
     notificationHandler(response.get(), 0);
 }
 
+TEST_F(TestSecureTunnelingFeature, SessionRecoveryPreservesTunnelConnectionAlreadyInProgress)
+{
+    string accessToken = "12345";
+    string region = "us-west-2";
+    uint16_t port = 22;
+    Aws::Crt::Vector<Aws::Crt::String> services;
+    services.push_back("SSH");
+
+    response->ClientMode = "destination";
+    response->Services = services;
+    response->ClientAccessToken = accessToken.c_str();
+    response->Region = region.c_str();
+
+    auto connectEntered = make_shared<promise<void>>();
+    auto connectEnteredFuture = connectEntered->get_future();
+    auto allowConnect = make_shared<promise<void>>();
+    auto allowConnectFuture = allowConnect->get_future().share();
+    auto contextDestroyed = make_shared<promise<void>>();
+    auto contextDestroyedFuture = contextDestroyed->get_future();
+    auto contextState = make_shared<BlockingSecureTunnelContextState>(
+        BlockingSecureTunnelContextState{connectEntered, allowConnectFuture, contextDestroyed});
+    unique_ptr<SecureTunnelingContext> blockingContext(new BlockingSecureTunnelContext(contextState));
+
+    Iotsecuretunneling::OnSubscribeToTunnelsNotifyResponse notificationHandler;
+    promise<void> recoveryCompleted;
+    future<void> recoveryCompletedFuture = recoveryCompleted.get_future();
+
+    EXPECT_CALL(*secureTunnelingFeature, createContext(StrEq(accessToken), StrEq(region), Eq(port)))
+        .Times(1)
+        .WillOnce(Return(ByMove(std::move(blockingContext))));
+    EXPECT_CALL(*secureTunnelingFeature, createClient()).Times(1).WillOnce(Return(mockClient));
+    EXPECT_CALL(*mockClient, SubscribeToTunnelsNotify(ThingNameEq(thingName), AWS_MQTT_QOS_AT_LEAST_ONCE, _, _))
+        .Times(2)
+        .WillOnce(DoAll(SaveArg<2>(&notificationHandler), InvokeArgument<3>(0), Return(true)))
+        .WillOnce(DoAll(InvokeArgument<3>(0), Return(true)));
+    EXPECT_CALL(*notifier, onEvent(secureTunnelingFeature.get(), ClientBaseEventNotification::FEATURE_STARTED))
+        .Times(1);
+    EXPECT_CALL(*notifier, onEvent(secureTunnelingFeature.get(), ClientBaseEventNotification::FEATURE_STOPPED))
+        .Times(1);
+
+    secureTunnelingFeature->init(manager, notifier, config);
+    secureTunnelingFeature->start();
+    ASSERT_TRUE(static_cast<bool>(notificationHandler));
+
+    thread notificationThread([&]() { notificationHandler(response.get(), 0); });
+    if (future_status::ready != connectEnteredFuture.wait_for(chrono::seconds(3)))
+    {
+        allowConnect->set_value();
+        notificationThread.join();
+        secureTunnelingFeature->stop();
+        FAIL() << "Tunnel connection did not start";
+    }
+
+    thread recoveryThread([&]() {
+        secureTunnelingFeature->onConnectionResumed(false);
+        recoveryCompleted.set_value();
+    });
+    if (future_status::ready != recoveryCompletedFuture.wait_for(chrono::seconds(3)))
+    {
+        allowConnect->set_value();
+        notificationThread.join();
+        recoveryThread.join();
+        secureTunnelingFeature->stop();
+        FAIL() << "Subscription recovery waited for the tunnel connection";
+    }
+    recoveryThread.join();
+
+    allowConnect->set_value();
+    notificationThread.join();
+
+    EXPECT_EQ(future_status::timeout, contextDestroyedFuture.wait_for(chrono::seconds(0)));
+    secureTunnelingFeature->stop();
+    EXPECT_EQ(future_status::timeout, contextDestroyedFuture.wait_for(chrono::seconds(0)));
+    secureTunnelingFeature.reset();
+    EXPECT_EQ(future_status::ready, contextDestroyedFuture.wait_for(chrono::seconds(0)));
+}
+
 TEST_F(TestSecureTunnelingFeature, StopDoesNotWaitForTunnelConnectionAndDiscardsStaleContext)
 {
     string accessToken = "12345";

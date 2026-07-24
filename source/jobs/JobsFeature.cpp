@@ -201,15 +201,11 @@ void JobsFeature::resubscribeAfterSessionLoss(std::uint64_t recoveryGeneration)
     if (!jobsClient->SubscribeToStartNextPendingJobExecutionAccepted(
             startNextRequest,
             AWS_MQTT_QOS_AT_LEAST_ONCE,
-            std::bind(
-                &JobsFeature::startNextPendingJobReceivedHandler, this, std::placeholders::_1, std::placeholders::_2),
-            [this, recoveryGeneration](int ioError) {
-                completeRecoverySubscription(
-                    recoveryGeneration,
-                    START_NEXT_ACCEPTED_SUBSCRIPTION,
-                    "StartNextPendingJobExecution accepted",
-                    ioError);
-            }))
+            createWeakCallback(&JobsFeature::startNextPendingJobReceivedHandler),
+            createRecoverySubscriptionCallback(
+                recoveryGeneration,
+                START_NEXT_ACCEPTED_SUBSCRIPTION,
+                "StartNextPendingJobExecution accepted")))
     {
         completeRecoverySubscription(
             recoveryGeneration,
@@ -221,15 +217,11 @@ void JobsFeature::resubscribeAfterSessionLoss(std::uint64_t recoveryGeneration)
     if (!jobsClient->SubscribeToStartNextPendingJobExecutionRejected(
             startNextRequest,
             AWS_MQTT_QOS_AT_LEAST_ONCE,
-            std::bind(
-                &JobsFeature::startNextPendingJobRejectedHandler, this, std::placeholders::_1, std::placeholders::_2),
-            [this, recoveryGeneration](int ioError) {
-                completeRecoverySubscription(
-                    recoveryGeneration,
-                    START_NEXT_REJECTED_SUBSCRIPTION,
-                    "StartNextPendingJobExecution rejected",
-                    ioError);
-            }))
+            createWeakCallback(&JobsFeature::startNextPendingJobRejectedHandler),
+            createRecoverySubscriptionCallback(
+                recoveryGeneration,
+                START_NEXT_REJECTED_SUBSCRIPTION,
+                "StartNextPendingJobExecution rejected")))
     {
         completeRecoverySubscription(
             recoveryGeneration,
@@ -243,11 +235,9 @@ void JobsFeature::resubscribeAfterSessionLoss(std::uint64_t recoveryGeneration)
     if (!jobsClient->SubscribeToNextJobExecutionChangedEvents(
             nextJobRequest,
             AWS_MQTT_QOS_AT_LEAST_ONCE,
-            std::bind(&JobsFeature::nextJobChangedHandler, this, std::placeholders::_1, std::placeholders::_2),
-            [this, recoveryGeneration](int ioError) {
-                completeRecoverySubscription(
-                    recoveryGeneration, NEXT_JOB_CHANGED_SUBSCRIPTION, "NextJobExecutionChanged events", ioError);
-            }))
+            createWeakCallback(&JobsFeature::nextJobChangedHandler),
+            createRecoverySubscriptionCallback(
+                recoveryGeneration, NEXT_JOB_CHANGED_SUBSCRIPTION, "NextJobExecutionChanged events")))
     {
         completeRecoverySubscription(
             recoveryGeneration,
@@ -262,15 +252,9 @@ void JobsFeature::resubscribeAfterSessionLoss(std::uint64_t recoveryGeneration)
     if (!jobsClient->SubscribeToUpdateJobExecutionAccepted(
             updateRequest,
             AWS_MQTT_QOS_AT_LEAST_ONCE,
-            std::bind(
-                &JobsFeature::updateJobExecutionStatusAcceptedHandler,
-                this,
-                std::placeholders::_1,
-                std::placeholders::_2),
-            [this, recoveryGeneration](int ioError) {
-                completeRecoverySubscription(
-                    recoveryGeneration, UPDATE_JOB_ACCEPTED_SUBSCRIPTION, "UpdateJobExecution accepted", ioError);
-            }))
+            createWeakCallback(&JobsFeature::updateJobExecutionStatusAcceptedHandler),
+            createRecoverySubscriptionCallback(
+                recoveryGeneration, UPDATE_JOB_ACCEPTED_SUBSCRIPTION, "UpdateJobExecution accepted")))
     {
         completeRecoverySubscription(
             recoveryGeneration,
@@ -282,15 +266,9 @@ void JobsFeature::resubscribeAfterSessionLoss(std::uint64_t recoveryGeneration)
     if (!jobsClient->SubscribeToUpdateJobExecutionRejected(
             updateRequest,
             AWS_MQTT_QOS_AT_LEAST_ONCE,
-            std::bind(
-                &JobsFeature::updateJobExecutionStatusRejectedHandler,
-                this,
-                std::placeholders::_1,
-                std::placeholders::_2),
-            [this, recoveryGeneration](int ioError) {
-                completeRecoverySubscription(
-                    recoveryGeneration, UPDATE_JOB_REJECTED_SUBSCRIPTION, "UpdateJobExecution rejected", ioError);
-            }))
+            createWeakCallback(&JobsFeature::updateJobExecutionStatusRejectedHandler),
+            createRecoverySubscriptionCallback(
+                recoveryGeneration, UPDATE_JOB_REJECTED_SUBSCRIPTION, "UpdateJobExecution rejected")))
     {
         completeRecoverySubscription(
             recoveryGeneration,
@@ -298,6 +276,21 @@ void JobsFeature::resubscribeAfterSessionLoss(std::uint64_t recoveryGeneration)
             "UpdateJobExecution rejected",
             SUBSCRIPTION_QUEUE_FAILED);
     }
+}
+
+OnSubscribeComplete JobsFeature::createRecoverySubscriptionCallback(
+    std::uint64_t recoveryGeneration,
+    std::uint8_t subscriptionMask,
+    const char *subscriptionName)
+{
+    std::weak_ptr<JobsFeature> weakSelf = shared_from_this();
+    return [weakSelf, recoveryGeneration, subscriptionMask, subscriptionName](int ioError) {
+        auto self = weakSelf.lock();
+        if (self)
+        {
+            self->completeRecoverySubscription(recoveryGeneration, subscriptionMask, subscriptionName, ioError);
+        }
+    };
 }
 
 void JobsFeature::completeRecoverySubscription(
@@ -379,8 +372,8 @@ bool JobsFeature::subscribeToStartNextPendingJobExecution()
     bool acceptedQueued = jobsClient->SubscribeToStartNextPendingJobExecutionAccepted(
         startNextSub,
         AWS_MQTT_QOS_AT_LEAST_ONCE,
-        std::bind(&JobsFeature::startNextPendingJobReceivedHandler, this, std::placeholders::_1, std::placeholders::_2),
-        std::bind(&JobsFeature::ackSubscribeToStartNextJobAccepted, this, std::placeholders::_1));
+        createWeakCallback(&JobsFeature::startNextPendingJobReceivedHandler),
+        createWeakCallback(&JobsFeature::ackSubscribeToStartNextJobAccepted));
     if (!acceptedQueued)
     {
         reportSubscriptionQueueFailure("StartNextPendingJobExecution accepted");
@@ -390,8 +383,8 @@ bool JobsFeature::subscribeToStartNextPendingJobExecution()
     bool rejectedQueued = jobsClient->SubscribeToStartNextPendingJobExecutionRejected(
         startNextSub,
         AWS_MQTT_QOS_AT_LEAST_ONCE,
-        std::bind(&JobsFeature::startNextPendingJobRejectedHandler, this, std::placeholders::_1, std::placeholders::_2),
-        std::bind(&JobsFeature::ackSubscribeToStartNextJobRejected, this, std::placeholders::_1));
+        createWeakCallback(&JobsFeature::startNextPendingJobRejectedHandler),
+        createWeakCallback(&JobsFeature::ackSubscribeToStartNextJobRejected));
     if (!rejectedQueued)
     {
         reportSubscriptionQueueFailure("StartNextPendingJobExecution rejected");
@@ -414,8 +407,8 @@ bool JobsFeature::subscribeToNextJobChangedEvents()
     bool queued = jobsClient->SubscribeToNextJobExecutionChangedEvents(
         nextJobSub,
         AWS_MQTT_QOS_AT_LEAST_ONCE,
-        std::bind(&JobsFeature::nextJobChangedHandler, this, std::placeholders::_1, std::placeholders::_2),
-        std::bind(&JobsFeature::ackSubscribeToNextJobChanged, this, std::placeholders::_1));
+        createWeakCallback(&JobsFeature::nextJobChangedHandler),
+        createWeakCallback(&JobsFeature::ackSubscribeToNextJobChanged));
     if (!queued)
     {
         reportSubscriptionQueueFailure("NextJobExecutionChanged events");
@@ -433,9 +426,8 @@ bool JobsFeature::subscribeToUpdateJobExecutionStatusAccepted(const string &jobI
     bool queued = jobsClient->SubscribeToUpdateJobExecutionAccepted(
         request,
         AWS_MQTT_QOS_AT_LEAST_ONCE,
-        std::bind(
-            &JobsFeature::updateJobExecutionStatusAcceptedHandler, this, std::placeholders::_1, std::placeholders::_2),
-        std::bind(&JobsFeature::ackSubscribeToUpdateJobExecutionAccepted, this, std::placeholders::_1));
+        createWeakCallback(&JobsFeature::updateJobExecutionStatusAcceptedHandler),
+        createWeakCallback(&JobsFeature::ackSubscribeToUpdateJobExecutionAccepted));
     if (!queued)
     {
         reportSubscriptionQueueFailure("UpdateJobExecution accepted");
@@ -453,9 +445,8 @@ bool JobsFeature::subscribeToUpdateJobExecutionStatusRejected(const string &jobI
     bool queued = jobsClient->SubscribeToUpdateJobExecutionRejected(
         request,
         AWS_MQTT_QOS_AT_LEAST_ONCE,
-        std::bind(
-            &JobsFeature::updateJobExecutionStatusRejectedHandler, this, std::placeholders::_1, std::placeholders::_2),
-        std::bind(&JobsFeature::ackSubscribeToUpdateJobExecutionRejected, this, std::placeholders::_1));
+        createWeakCallback(&JobsFeature::updateJobExecutionStatusRejectedHandler),
+        createWeakCallback(&JobsFeature::ackSubscribeToUpdateJobExecutionRejected));
     if (!queued)
     {
         reportSubscriptionQueueFailure("UpdateJobExecution rejected");

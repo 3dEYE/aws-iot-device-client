@@ -279,7 +279,7 @@ class TestJobsFeature : public ::testing::Test
         config = getSimpleConfig();
         startNextJobExecutionResponse =
             std::unique_ptr<StartNextJobExecutionResponse>(new StartNextJobExecutionResponse());
-        jobsMock = unique_ptr<MockJobsFeature>(new MockJobsFeature());
+        jobsMock = make_shared<MockJobsFeature>();
         mockClient = shared_ptr<MockJobsClient>(new MockJobsClient());
         mockEngine = shared_ptr<MockJobEngine>(new MockJobEngine());
     }
@@ -288,7 +288,7 @@ class TestJobsFeature : public ::testing::Test
     SharedCrtResourceManager resourceManager;
     PlainConfig config;
     unique_ptr<StartNextJobExecutionResponse> startNextJobExecutionResponse;
-    unique_ptr<MockJobsFeature> jobsMock;
+    shared_ptr<MockJobsFeature> jobsMock;
     shared_ptr<MockJobsClient> mockClient;
     shared_ptr<MockJobEngine> mockEngine;
 };
@@ -379,7 +379,9 @@ static void expectSuccessfulJobsStartup(
 struct JobsRecoveryCallbacks
 {
     Iotjobs::OnSubscribeToStartNextPendingJobExecutionAcceptedResponse startNextAcceptedResponse;
+    Iotjobs::OnSubscribeToStartNextPendingJobExecutionRejectedResponse startNextRejectedResponse;
     Iotjobs::OnSubscribeToNextJobExecutionChangedEventsResponse nextJobChangedResponse;
+    Iotjobs::OnSubscribeToUpdateJobExecutionAcceptedResponse updateJobAcceptedResponse;
     Iotjobs::OnSubscribeToUpdateJobExecutionRejectedResponse updateJobRejectedResponse;
     Iotjobs::OnSubscribeComplete startNextAccepted;
     Iotjobs::OnSubscribeComplete startNextRejected;
@@ -408,7 +410,10 @@ static void expectJobsRecoverySubscriptions(
         SubscribeToStartNextPendingJobExecutionRejected(
             ThingNameEq(thingName), AWS_MQTT_QOS_AT_LEAST_ONCE, _, _))
         .Times(1)
-        .WillOnce(DoAll(SaveArg<3>(&callbacks.startNextRejected), Return(true)));
+        .WillOnce(DoAll(
+            SaveArg<2>(&callbacks.startNextRejectedResponse),
+            SaveArg<3>(&callbacks.startNextRejected),
+            Return(true)));
     EXPECT_CALL(
         *client,
         SubscribeToNextJobExecutionChangedEvents(ThingNameEq(thingName), AWS_MQTT_QOS_AT_LEAST_ONCE, _, _))
@@ -419,7 +424,10 @@ static void expectJobsRecoverySubscriptions(
         *client,
         SubscribeToUpdateJobExecutionAccepted(ThingNameEq(thingName), AWS_MQTT_QOS_AT_LEAST_ONCE, _, _))
         .Times(1)
-        .WillOnce(DoAll(SaveArg<3>(&callbacks.updateJobAccepted), Return(true)));
+        .WillOnce(DoAll(
+            SaveArg<2>(&callbacks.updateJobAcceptedResponse),
+            SaveArg<3>(&callbacks.updateJobAccepted),
+            Return(true)));
     EXPECT_CALL(
         *client,
         SubscribeToUpdateJobExecutionRejected(ThingNameEq(thingName), AWS_MQTT_QOS_AT_LEAST_ONCE, _, _))
@@ -1211,6 +1219,50 @@ TEST_F(TestJobsFeature, SubscriptionRecoveryCallbacksAfterStopAreIgnored)
     EXPECT_CALL(*mockClient, PublishStartNextPendingJobExecution(_, _, _)).Times(0);
     jobsMock->stop();
 
+    callbacks.startNextAccepted(0);
+    callbacks.startNextRejected(0);
+    callbacks.nextJobChanged(0);
+    callbacks.updateJobAccepted(0);
+    callbacks.updateJobRejected(0);
+}
+
+TEST_F(TestJobsFeature, SubscriptionRecoveryCallbacksAfterDestructionAreIgnored)
+{
+    expectSuccessfulJobsStartup(*jobsMock, mockClient, ThingName);
+    jobsMock->init(std::shared_ptr<Mqtt::MqttConnection>(), notifier, config);
+    jobsMock->invokeRunJobs();
+    Mock::VerifyAndClearExpectations(mockClient.get());
+
+    JobsRecoveryCallbacks callbacks;
+    expectJobsRecoverySubscriptions(mockClient, ThingName, callbacks);
+    jobsMock->onConnectionResumed(false);
+    Mock::VerifyAndClearExpectations(mockClient.get());
+
+    EXPECT_CALL(*notifier, onEvent(jobsMock.get(), ClientBaseEventNotification::FEATURE_STOPPED)).Times(1);
+    EXPECT_CALL(*notifier, onError(_, _, _)).Times(0);
+    EXPECT_CALL(*mockClient, PublishStartNextPendingJobExecution(_, _, _)).Times(0);
+    jobsMock->stop();
+
+    weak_ptr<MockJobsFeature> weakFeature = jobsMock;
+    jobsMock.reset();
+    ASSERT_TRUE(weakFeature.expired());
+
+    ASSERT_TRUE(callbacks.startNextAcceptedResponse);
+    ASSERT_TRUE(callbacks.startNextRejectedResponse);
+    ASSERT_TRUE(callbacks.nextJobChangedResponse);
+    ASSERT_TRUE(callbacks.updateJobAcceptedResponse);
+    ASSERT_TRUE(callbacks.updateJobRejectedResponse);
+    ASSERT_TRUE(callbacks.startNextAccepted);
+    ASSERT_TRUE(callbacks.startNextRejected);
+    ASSERT_TRUE(callbacks.nextJobChanged);
+    ASSERT_TRUE(callbacks.updateJobAccepted);
+    ASSERT_TRUE(callbacks.updateJobRejected);
+
+    callbacks.startNextAcceptedResponse(nullptr, 42);
+    callbacks.startNextRejectedResponse(nullptr, 42);
+    callbacks.nextJobChangedResponse(nullptr, 42);
+    callbacks.updateJobAcceptedResponse(nullptr, 42);
+    callbacks.updateJobRejectedResponse(nullptr, 42);
     callbacks.startNextAccepted(0);
     callbacks.startNextRejected(0);
     callbacks.nextJobChanged(0);

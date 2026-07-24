@@ -74,6 +74,7 @@ namespace Aws
                         mStarted = false;
                         mSubscriptionNeedsRecovery = false;
                         ++mConnectionRecoveryGeneration;
+                        ++mFeatureLifecycleGeneration;
                     }
                     for (auto &c : mContexts)
                     {
@@ -286,6 +287,7 @@ namespace Aws
                     std::uint64_t subscriptionGeneration)
                 {
                     lock_guard<mutex> notificationLock(mTunnelNotificationLock);
+                    std::uint64_t featureLifecycleGeneration;
                     {
                         lock_guard<mutex> lock(mConnectionRecoveryLock);
                         if (!mStarted || subscriptionGeneration != mConnectionRecoveryGeneration)
@@ -293,6 +295,7 @@ namespace Aws
                             LOG_DEBUG(TAG, "Ignoring stale tunnel notification");
                             return;
                         }
+                        featureLifecycleGeneration = mFeatureLifecycleGeneration;
                     }
 
                     LOG_DEBUG(TAG, "Received MQTT Tunnel Notification");
@@ -348,9 +351,9 @@ namespace Aws
 
                     {
                         lock_guard<mutex> lock(mConnectionRecoveryLock);
-                        if (!mStarted || subscriptionGeneration != mConnectionRecoveryGeneration)
+                        if (!mStarted || featureLifecycleGeneration != mFeatureLifecycleGeneration)
                         {
-                            LOG_DEBUG(TAG, "Ignoring stale tunnel notification");
+                            LOG_DEBUG(TAG, "Ignoring tunnel notification invalidated by a feature lifecycle change");
                             return;
                         }
 
@@ -374,9 +377,9 @@ namespace Aws
                     }
 
                     lock_guard<mutex> lock(mConnectionRecoveryLock);
-                    if (!mStarted || subscriptionGeneration != mConnectionRecoveryGeneration)
+                    if (!mStarted || featureLifecycleGeneration != mFeatureLifecycleGeneration)
                     {
-                        LOG_DEBUG(TAG, "Discarding tunnel opened by a stale notification");
+                        LOG_DEBUG(TAG, "Discarding tunnel opened after a feature lifecycle change");
                         return;
                     }
 

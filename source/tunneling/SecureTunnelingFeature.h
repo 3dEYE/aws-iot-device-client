@@ -243,6 +243,11 @@ namespace Aws
                     std::uint64_t mConnectionRecoveryGeneration{0};
 
                     /**
+                     * \brief Identifies stop boundaries without invalidating notifications during MQTT recovery
+                     */
+                    std::uint64_t mFeatureLifecycleGeneration{0};
+
+                    /**
                      * \brief Remains true until the current subscription recovery receives a successful SUBACK
                      */
                     bool mSubscriptionNeedsRecovery{false};
