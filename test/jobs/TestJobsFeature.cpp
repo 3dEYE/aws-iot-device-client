@@ -699,7 +699,12 @@ TEST_F(TestJobsFeature, ConnectionResumedAfterSessionLossDoesNotPollWhenSubscrip
     expectJobsRecoverySubscriptions(mockClient, ThingName, callbacks, false);
     EXPECT_CALL(
         *notifier,
-        onError(jobsMock.get(), ClientBaseErrorNotification::SUBSCRIPTION_FAILED, HasSubstr("StartNext")))
+        onError(
+            jobsMock.get(),
+            ClientBaseErrorNotification::SUBSCRIPTION_FAILED,
+            AllOf(
+                HasSubstr("Failed to queue"),
+                HasSubstr("StartNextPendingJobExecution accepted"))))
         .Times(1);
     EXPECT_CALL(*mockClient, PublishStartNextPendingJobExecution(_, _, _)).Times(0);
 
@@ -728,7 +733,9 @@ TEST_F(TestJobsFeature, ConnectionResumedAfterSessionLossDoesNotPollWhenSubscrip
         onError(
             jobsMock.get(),
             ClientBaseErrorNotification::SUBSCRIPTION_FAILED,
-            HasSubstr("UpdateJobExecution accepted")))
+            AllOf(
+                HasSubstr("UpdateJobExecution accepted"),
+                HasSubstr("ioError {42}"))))
         .Times(1);
     EXPECT_CALL(*mockClient, PublishStartNextPendingJobExecution(_, _, _)).Times(0);
     EXPECT_CALL(*jobsMock, publishUpdateJobExecutionStatusWithRetry(_, _, _, _)).Times(0);

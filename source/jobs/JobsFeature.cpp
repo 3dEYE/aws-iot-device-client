@@ -44,6 +44,7 @@ namespace
     constexpr std::uint8_t NEXT_JOB_CHANGED_SUBSCRIPTION = 1U << 2U;
     constexpr std::uint8_t UPDATE_JOB_ACCEPTED_SUBSCRIPTION = 1U << 3U;
     constexpr std::uint8_t UPDATE_JOB_REJECTED_SUBSCRIPTION = 1U << 4U;
+    constexpr int SUBSCRIPTION_QUEUE_FAILED = -1;
 } // namespace
 
 string JobsFeature::getName()
@@ -196,7 +197,7 @@ void JobsFeature::resubscribeAfterSessionLoss(std::uint64_t recoveryGeneration)
             recoveryGeneration,
             START_NEXT_ACCEPTED_SUBSCRIPTION,
             "StartNextPendingJobExecution accepted",
-            -1);
+            SUBSCRIPTION_QUEUE_FAILED);
     }
 
     if (!jobsClient->SubscribeToStartNextPendingJobExecutionRejected(
@@ -216,7 +217,7 @@ void JobsFeature::resubscribeAfterSessionLoss(std::uint64_t recoveryGeneration)
             recoveryGeneration,
             START_NEXT_REJECTED_SUBSCRIPTION,
             "StartNextPendingJobExecution rejected",
-            -1);
+            SUBSCRIPTION_QUEUE_FAILED);
     }
 
     NextJobExecutionChangedSubscriptionRequest nextJobRequest;
@@ -231,7 +232,10 @@ void JobsFeature::resubscribeAfterSessionLoss(std::uint64_t recoveryGeneration)
             }))
     {
         completeRecoverySubscription(
-            recoveryGeneration, NEXT_JOB_CHANGED_SUBSCRIPTION, "NextJobExecutionChanged events", -1);
+            recoveryGeneration,
+            NEXT_JOB_CHANGED_SUBSCRIPTION,
+            "NextJobExecutionChanged events",
+            SUBSCRIPTION_QUEUE_FAILED);
     }
 
     UpdateJobExecutionSubscriptionRequest updateRequest;
@@ -251,7 +255,10 @@ void JobsFeature::resubscribeAfterSessionLoss(std::uint64_t recoveryGeneration)
             }))
     {
         completeRecoverySubscription(
-            recoveryGeneration, UPDATE_JOB_ACCEPTED_SUBSCRIPTION, "UpdateJobExecution accepted", -1);
+            recoveryGeneration,
+            UPDATE_JOB_ACCEPTED_SUBSCRIPTION,
+            "UpdateJobExecution accepted",
+            SUBSCRIPTION_QUEUE_FAILED);
     }
 
     if (!jobsClient->SubscribeToUpdateJobExecutionRejected(
@@ -268,7 +275,10 @@ void JobsFeature::resubscribeAfterSessionLoss(std::uint64_t recoveryGeneration)
             }))
     {
         completeRecoverySubscription(
-            recoveryGeneration, UPDATE_JOB_REJECTED_SUBSCRIPTION, "UpdateJobExecution rejected", -1);
+            recoveryGeneration,
+            UPDATE_JOB_REJECTED_SUBSCRIPTION,
+            "UpdateJobExecution rejected",
+            SUBSCRIPTION_QUEUE_FAILED);
     }
 }
 
@@ -293,17 +303,27 @@ void JobsFeature::completeRecoverySubscription(
         }
         completedRecoverySubscriptions |= subscriptionMask;
 
-        LOGM_DEBUG(
-            TAG,
-            "Recovery acknowledgement received for %s subscription with code {%d}",
-            subscriptionName,
-            ioError);
-
-        if (ioError)
+        if (ioError == SUBSCRIPTION_QUEUE_FAILED)
         {
             connectionRecoveryFailed = true;
             errorMessage = FormatMessage(
-                "Encountered ioError {%d} while restoring the %s subscription", ioError, subscriptionName);
+                "Failed to queue the %s subscription while restoring AWS IoT Jobs subscriptions",
+                subscriptionName);
+        }
+        else
+        {
+            LOGM_DEBUG(
+                TAG,
+                "Recovery acknowledgement received for %s subscription with code {%d}",
+                subscriptionName,
+                ioError);
+
+            if (ioError)
+            {
+                connectionRecoveryFailed = true;
+                errorMessage = FormatMessage(
+                    "Encountered ioError {%d} while restoring the %s subscription", ioError, subscriptionName);
+            }
         }
 
         --pendingRecoverySubscriptions;
