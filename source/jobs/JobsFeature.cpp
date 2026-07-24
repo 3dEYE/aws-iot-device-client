@@ -1039,7 +1039,8 @@ int JobsFeature::init(
 
 void JobsFeature::launchJobsThread()
 {
-    thread jobs_thread(&JobsFeature::runJobs, this);
+    auto self = shared_from_this();
+    thread jobs_thread([self]() { self->runJobs(); });
     jobs_thread.detach();
 }
 

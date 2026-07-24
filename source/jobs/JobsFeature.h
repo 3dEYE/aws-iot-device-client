@@ -34,7 +34,9 @@ namespace Aws
                 /**
                  * \brief Provides IoT Jobs related functionality within the Device Client
                  */
-                class JobsFeature : public Feature
+                class JobsFeature
+                    : public Feature,
+                      public std::enable_shared_from_this<JobsFeature>
                 {
                   public:
                     static constexpr char NAME[] = "Jobs";
