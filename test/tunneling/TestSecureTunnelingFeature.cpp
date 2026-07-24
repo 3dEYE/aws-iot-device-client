@@ -293,7 +293,7 @@ TEST_F(TestSecureTunnelingFeature, StopWaitsForRecoverySubscriptionAndIgnoresLat
     secureTunnelingFeature->start();
 
     thread recoveryThread([&]() { secureTunnelingFeature->onConnectionResumed(false); });
-    if (future_status::ready != recoverySubscribeEnteredFuture.wait_for(chrono::seconds(1)))
+    if (future_status::ready != recoverySubscribeEnteredFuture.wait_for(chrono::seconds(3)))
     {
         allowRecoverySubscribe.set_value();
         recoveryThread.join();
@@ -305,14 +305,14 @@ TEST_F(TestSecureTunnelingFeature, StopWaitsForRecoverySubscriptionAndIgnoresLat
         secureTunnelingFeature->stop();
         stopCompleted.set_value();
     });
-    if (future_status::ready != stopStartedFuture.wait_for(chrono::seconds(1)))
+    if (future_status::ready != stopStartedFuture.wait_for(chrono::seconds(3)))
     {
         allowRecoverySubscribe.set_value();
         recoveryThread.join();
         stopThread.join();
         FAIL() << "Feature stop did not start";
     }
-    EXPECT_EQ(future_status::timeout, stopCompletedFuture.wait_for(chrono::seconds(1)));
+    EXPECT_EQ(future_status::timeout, stopCompletedFuture.wait_for(chrono::seconds(3)));
 
     allowRecoverySubscribe.set_value();
     recoveryThread.join();

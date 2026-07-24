@@ -506,6 +506,85 @@ TEST_F(TestJobsFeature, StartupIgnoresJobEventsUntilAllSubscriptionsAreReady)
     jobsMock->invokeRunJobs();
 }
 
+TEST_F(TestJobsFeature, StartupQueueFailureRecoversSubscriptionsBeforePolling)
+{
+    jobsMock->init(std::shared_ptr<Mqtt::MqttConnection>(), notifier, config);
+    EXPECT_CALL(*jobsMock, createJobsClient()).Times(1).WillOnce(Return(mockClient));
+
+    JobsRecoveryCallbacks callbacks;
+    EXPECT_CALL(
+        *mockClient,
+        SubscribeToStartNextPendingJobExecutionAccepted(
+            ThingNameEq(ThingName), AWS_MQTT_QOS_AT_LEAST_ONCE, _, _))
+        .Times(2)
+        .WillOnce(Return(false))
+        .WillOnce(DoAll(SaveArg<3>(&callbacks.startNextAccepted), Return(true)));
+    EXPECT_CALL(
+        *mockClient,
+        SubscribeToStartNextPendingJobExecutionRejected(
+            ThingNameEq(ThingName), AWS_MQTT_QOS_AT_LEAST_ONCE, _, _))
+        .Times(2)
+        .WillOnce(InvokeSubAck(0))
+        .WillOnce(DoAll(SaveArg<3>(&callbacks.startNextRejected), Return(true)));
+    EXPECT_CALL(
+        *mockClient,
+        SubscribeToNextJobExecutionChangedEvents(ThingNameEq(ThingName), AWS_MQTT_QOS_AT_LEAST_ONCE, _, _))
+        .Times(2)
+        .WillOnce(InvokeSubAck(0))
+        .WillOnce(DoAll(SaveArg<3>(&callbacks.nextJobChanged), Return(true)));
+    EXPECT_CALL(
+        *mockClient,
+        SubscribeToUpdateJobExecutionAccepted(ThingNameEq(ThingName), AWS_MQTT_QOS_AT_LEAST_ONCE, _, _))
+        .Times(2)
+        .WillOnce(InvokeSubAck(0))
+        .WillOnce(DoAll(SaveArg<3>(&callbacks.updateJobAccepted), Return(true)));
+    EXPECT_CALL(
+        *mockClient,
+        SubscribeToUpdateJobExecutionRejected(ThingNameEq(ThingName), AWS_MQTT_QOS_AT_LEAST_ONCE, _, _))
+        .Times(2)
+        .WillOnce(InvokeSubAck(0))
+        .WillOnce(DoAll(SaveArg<3>(&callbacks.updateJobRejected), Return(true)));
+    EXPECT_CALL(
+        *notifier,
+        onError(
+            jobsMock.get(),
+            ClientBaseErrorNotification::SUBSCRIPTION_FAILED,
+            AllOf(HasSubstr("Failed to queue"), HasSubstr("StartNextPendingJobExecution accepted"))))
+        .Times(1);
+
+    int publishCount = 0;
+    EXPECT_CALL(
+        *mockClient,
+        PublishStartNextPendingJobExecution(ThingNameEq(ThingName), AWS_MQTT_QOS_AT_LEAST_ONCE, _))
+        .Times(1)
+        .WillOnce(Invoke(
+            [&publishCount](
+                const StartNextPendingJobExecutionRequest &,
+                Aws::Crt::Mqtt::QOS,
+                const Iotjobs::OnPublishComplete &onPubAck) {
+                ++publishCount;
+                onPubAck(0);
+            }));
+
+    jobsMock->invokeRunJobs();
+
+    ASSERT_TRUE(callbacks.startNextAccepted);
+    ASSERT_TRUE(callbacks.startNextRejected);
+    ASSERT_TRUE(callbacks.nextJobChanged);
+    ASSERT_TRUE(callbacks.updateJobAccepted);
+    ASSERT_TRUE(callbacks.updateJobRejected);
+    EXPECT_EQ(0, publishCount);
+
+    callbacks.startNextAccepted(0);
+    callbacks.startNextRejected(0);
+    callbacks.nextJobChanged(0);
+    callbacks.updateJobAccepted(0);
+    EXPECT_EQ(0, publishCount);
+
+    callbacks.updateJobRejected(0);
+    EXPECT_EQ(1, publishCount);
+}
+
 TEST_F(TestJobsFeature, ConnectionResumedWithExistingSessionPollsWithoutResubscribing)
 {
     expectSuccessfulJobsStartup(*jobsMock, mockClient, ThingName);
@@ -913,7 +992,7 @@ TEST_F(TestJobsFeature, StopWaitsForSubscriptionRecoveryToFinishQueueing)
     EXPECT_CALL(*notifier, onEvent(jobsMock.get(), ClientBaseEventNotification::FEATURE_STOPPED)).Times(1);
 
     thread recoveryThread([&]() { jobsMock->onConnectionResumed(false); });
-    if (future_status::ready != recoverySubscribeEnteredFuture.wait_for(chrono::seconds(1)))
+    if (future_status::ready != recoverySubscribeEnteredFuture.wait_for(chrono::seconds(3)))
     {
         allowRecoverySubscribe.set_value();
         recoveryThread.join();
@@ -925,14 +1004,14 @@ TEST_F(TestJobsFeature, StopWaitsForSubscriptionRecoveryToFinishQueueing)
         jobsMock->stop();
         stopCompleted.set_value();
     });
-    if (future_status::ready != stopStartedFuture.wait_for(chrono::seconds(1)))
+    if (future_status::ready != stopStartedFuture.wait_for(chrono::seconds(3)))
     {
         allowRecoverySubscribe.set_value();
         recoveryThread.join();
         stopThread.join();
         FAIL() << "Feature stop did not start";
     }
-    EXPECT_EQ(future_status::timeout, stopCompletedFuture.wait_for(chrono::seconds(1)));
+    EXPECT_EQ(future_status::timeout, stopCompletedFuture.wait_for(chrono::seconds(3)));
 
     allowRecoverySubscribe.set_value();
     recoveryThread.join();

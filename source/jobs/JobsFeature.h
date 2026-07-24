@@ -101,7 +101,7 @@ namespace Aws
                     /**
                      * \brief Used by the logger to specify that log messages are coming from the Jobs feature
                      */
-                    const char *TAG = "JobsFeature.cpp";
+                    static constexpr char TAG[] = "JobsFeature.cpp";
 
                     /**
                      * \brief The default directory that the Jobs feature will use to find executables matching
@@ -209,6 +209,7 @@ namespace Aws
                     void ackUpdateJobExecutionStatus(int ioError) const;
                     void ackSubscribeToUpdateJobExecutionAccepted(int ioError);
                     void ackSubscribeToUpdateJobExecutionRejected(int ioError);
+                    void reportSubscriptionQueueFailure(const char *subscriptionName);
                     std::promise<int> updateAcceptedPromise;
                     std::promise<int> updateRejectedPromise;
 
@@ -250,26 +251,32 @@ namespace Aws
                         const std::function<void(void)> &onCompleteCallback);
                     /**
                      * \brief Creates a subscription to the startNextPendingJobExecution topic
+                     *
+                     * @return true when both subscription requests were queued
                      */
-                    virtual void subscribeToStartNextPendingJobExecution();
+                    virtual bool subscribeToStartNextPendingJobExecution();
                     /**
                      * \brief Creates a subscription to NextJobChangedEvents
+                     *
+                     * @return true when the subscription request was queued
                      */
-                    virtual void subscribeToNextJobChangedEvents();
+                    virtual bool subscribeToNextJobChangedEvents();
                     /**
                      * \brief Enables the Jobs feature to receive response information from the IoT Jobs service when an
                      * update is accepted
                      * @param jobId the job ID to listen for. Use "+" to subscribe for all job executions for this
                      * thing.
+                     * @return true when the subscription was queued and acknowledged successfully
                      */
-                    virtual void subscribeToUpdateJobExecutionStatusAccepted(const std::string &jobId);
+                    virtual bool subscribeToUpdateJobExecutionStatusAccepted(const std::string &jobId);
                     /**
                      * \brief Enables the Jobs feature to receive response information from the IoT Jobs service when an
                      * update is rejected
                      * @param jobId the job ID to listen for. Use "+" to subscribe for all job executions for this
                      * thing.
+                     * @return true when the subscription was queued and acknowledged successfully
                      */
-                    virtual void subscribeToUpdateJobExecutionStatusRejected(const std::string &jobId);
+                    virtual bool subscribeToUpdateJobExecutionStatusRejected(const std::string &jobId);
 
                     // Incoming Mqtt message handlers
                     /**
