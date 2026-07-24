@@ -313,6 +313,27 @@ ACTION_P(InvokeSubAck, ioError)
     return true;
 }
 
+enum class StartupSubscription
+{
+    START_NEXT_ACCEPTED,
+    START_NEXT_REJECTED,
+    NEXT_JOB_CHANGED
+};
+
+ACTION_P3(InvokeOrCaptureSubAck, capture, savedCallback, callbackCaptured)
+{
+    if (capture)
+    {
+        *savedCallback = arg3;
+        callbackCaptured->set_value();
+    }
+    else
+    {
+        arg3(0);
+    }
+    return true;
+}
+
 static void expectSuccessfulJobsStartup(
     MockJobsFeature &jobsFeature,
     const shared_ptr<MockJobsClient> &client,
@@ -512,12 +533,13 @@ TEST_F(TestJobsFeature, StartupQueueFailureRecoversSubscriptionsBeforePolling)
     EXPECT_CALL(*jobsMock, createJobsClient()).Times(1).WillOnce(Return(mockClient));
 
     JobsRecoveryCallbacks callbacks;
+    Iotjobs::OnSubscribeComplete failedStartupAck;
     EXPECT_CALL(
         *mockClient,
         SubscribeToStartNextPendingJobExecutionAccepted(
             ThingNameEq(ThingName), AWS_MQTT_QOS_AT_LEAST_ONCE, _, _))
         .Times(2)
-        .WillOnce(Return(false))
+        .WillOnce(DoAll(SaveArg<3>(&failedStartupAck), Return(false)))
         .WillOnce(DoAll(SaveArg<3>(&callbacks.startNextAccepted), Return(true)));
     EXPECT_CALL(
         *mockClient,
@@ -575,6 +597,10 @@ TEST_F(TestJobsFeature, StartupQueueFailureRecoversSubscriptionsBeforePolling)
     ASSERT_TRUE(callbacks.updateJobRejected);
     EXPECT_EQ(0, publishCount);
 
+    // A callback received after the subscription request returned false must not complete the startup result twice.
+    ASSERT_TRUE(failedStartupAck);
+    failedStartupAck(0);
+
     callbacks.startNextAccepted(0);
     callbacks.startNextRejected(0);
     callbacks.nextJobChanged(0);
@@ -583,6 +609,146 @@ TEST_F(TestJobsFeature, StartupQueueFailureRecoversSubscriptionsBeforePolling)
 
     callbacks.updateJobRejected(0);
     EXPECT_EQ(1, publishCount);
+}
+
+static void verifyStartupSubAckFailureRecovery(
+    MockJobsFeature &jobsFeature,
+    const shared_ptr<MockJobsClient> &client,
+    const shared_ptr<MockNotifier> &notifier,
+    const PlainConfig &config,
+    const Aws::Crt::String &thingName,
+    StartupSubscription failedStartupSubscription)
+{
+    jobsFeature.init(std::shared_ptr<Mqtt::MqttConnection>(), notifier, config);
+    EXPECT_CALL(jobsFeature, createJobsClient()).Times(1).WillOnce(Return(client));
+
+    promise<void> delayedAckCaptured;
+    future<void> delayedAckCapturedFuture = delayedAckCaptured.get_future();
+    Iotjobs::OnSubscribeComplete delayedAck;
+    JobsRecoveryCallbacks callbacks;
+
+    EXPECT_CALL(
+        *client,
+        SubscribeToStartNextPendingJobExecutionAccepted(
+            ThingNameEq(thingName), AWS_MQTT_QOS_AT_LEAST_ONCE, _, _))
+        .Times(2)
+        .WillOnce(InvokeOrCaptureSubAck(
+            failedStartupSubscription == StartupSubscription::START_NEXT_ACCEPTED,
+            &delayedAck,
+            &delayedAckCaptured))
+        .WillOnce(DoAll(SaveArg<3>(&callbacks.startNextAccepted), Return(true)));
+    EXPECT_CALL(
+        *client,
+        SubscribeToStartNextPendingJobExecutionRejected(
+            ThingNameEq(thingName), AWS_MQTT_QOS_AT_LEAST_ONCE, _, _))
+        .Times(2)
+        .WillOnce(InvokeOrCaptureSubAck(
+            failedStartupSubscription == StartupSubscription::START_NEXT_REJECTED,
+            &delayedAck,
+            &delayedAckCaptured))
+        .WillOnce(DoAll(SaveArg<3>(&callbacks.startNextRejected), Return(true)));
+    EXPECT_CALL(
+        *client,
+        SubscribeToNextJobExecutionChangedEvents(ThingNameEq(thingName), AWS_MQTT_QOS_AT_LEAST_ONCE, _, _))
+        .Times(2)
+        .WillOnce(InvokeOrCaptureSubAck(
+            failedStartupSubscription == StartupSubscription::NEXT_JOB_CHANGED,
+            &delayedAck,
+            &delayedAckCaptured))
+        .WillOnce(DoAll(SaveArg<3>(&callbacks.nextJobChanged), Return(true)));
+    EXPECT_CALL(
+        *client,
+        SubscribeToUpdateJobExecutionAccepted(ThingNameEq(thingName), AWS_MQTT_QOS_AT_LEAST_ONCE, _, _))
+        .Times(2)
+        .WillOnce(InvokeSubAck(0))
+        .WillOnce(DoAll(SaveArg<3>(&callbacks.updateJobAccepted), Return(true)));
+    EXPECT_CALL(
+        *client,
+        SubscribeToUpdateJobExecutionRejected(ThingNameEq(thingName), AWS_MQTT_QOS_AT_LEAST_ONCE, _, _))
+        .Times(2)
+        .WillOnce(InvokeSubAck(0))
+        .WillOnce(DoAll(SaveArg<3>(&callbacks.updateJobRejected), Return(true)));
+
+    const char *failedSubscription = "";
+    switch (failedStartupSubscription)
+    {
+        case StartupSubscription::START_NEXT_ACCEPTED:
+            failedSubscription = "StartNextJobAccepted";
+            break;
+        case StartupSubscription::START_NEXT_REJECTED:
+            failedSubscription = "StartNextJobRejected";
+            break;
+        case StartupSubscription::NEXT_JOB_CHANGED:
+            failedSubscription = "NextJobChanged";
+            break;
+    }
+    EXPECT_CALL(
+        *notifier,
+        onError(
+            &jobsFeature,
+            ClientBaseErrorNotification::SUBSCRIPTION_FAILED,
+            HasSubstr(failedSubscription)))
+        .Times(1);
+
+    atomic<int> publishCount{0};
+    EXPECT_CALL(
+        *client,
+        PublishStartNextPendingJobExecution(ThingNameEq(thingName), AWS_MQTT_QOS_AT_LEAST_ONCE, _))
+        .Times(1)
+        .WillOnce(Invoke(
+            [&publishCount](
+                const StartNextPendingJobExecutionRequest &,
+                Aws::Crt::Mqtt::QOS,
+                const Iotjobs::OnPublishComplete &onPubAck) {
+                ++publishCount;
+                onPubAck(0);
+            }));
+
+    thread startupThread([&jobsFeature]() { jobsFeature.invokeRunJobs(); });
+    if (future_status::ready != delayedAckCapturedFuture.wait_for(chrono::seconds(3)))
+    {
+        startupThread.join();
+        FAIL() << "Startup subscription acknowledgement was not captured";
+    }
+
+    ASSERT_TRUE(delayedAck);
+    EXPECT_EQ(0, publishCount.load());
+    delayedAck(42);
+    startupThread.join();
+
+    ASSERT_TRUE(callbacks.startNextAccepted);
+    ASSERT_TRUE(callbacks.startNextRejected);
+    ASSERT_TRUE(callbacks.nextJobChanged);
+    ASSERT_TRUE(callbacks.updateJobAccepted);
+    ASSERT_TRUE(callbacks.updateJobRejected);
+    EXPECT_EQ(0, publishCount.load());
+
+    callbacks.startNextAccepted(0);
+    callbacks.startNextRejected(0);
+    callbacks.nextJobChanged(0);
+    callbacks.updateJobAccepted(0);
+    EXPECT_EQ(0, publishCount.load());
+
+    callbacks.updateJobRejected(0);
+    EXPECT_EQ(1, publishCount.load());
+}
+
+TEST_F(TestJobsFeature, StartupStartNextAcceptedSubAckFailureRecoversBeforePolling)
+{
+    verifyStartupSubAckFailureRecovery(
+        *jobsMock, mockClient, notifier, config, ThingName, StartupSubscription::START_NEXT_ACCEPTED);
+}
+
+TEST_F(TestJobsFeature, StartupStartNextRejectedSubAckFailureRecoversBeforePolling)
+{
+    verifyStartupSubAckFailureRecovery(
+        *jobsMock, mockClient, notifier, config, ThingName, StartupSubscription::START_NEXT_REJECTED);
+}
+
+TEST_F(TestJobsFeature, StartupNextJobChangedSubAckFailureRecoversBeforePolling)
+{
+    verifyStartupSubAckFailureRecovery(
+        *jobsMock, mockClient, notifier, config, ThingName, StartupSubscription::NEXT_JOB_CHANGED);
 }
 
 TEST_F(TestJobsFeature, ConnectionResumedWithExistingSessionPollsWithoutResubscribing)

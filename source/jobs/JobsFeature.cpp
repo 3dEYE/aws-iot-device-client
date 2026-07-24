@@ -64,6 +64,7 @@ void JobsFeature::ackSubscribeToNextJobChanged(int ioError)
         LOG_ERROR(TAG, errorMessage.c_str());
         baseNotifier->onError(this, ClientBaseErrorNotification::SUBSCRIPTION_FAILED, errorMessage);
     }
+    nextJobChangedResult.complete(ioError);
 }
 
 void JobsFeature::ackSubscribeToStartNextJobAccepted(int ioError)
@@ -76,6 +77,7 @@ void JobsFeature::ackSubscribeToStartNextJobAccepted(int ioError)
         LOG_ERROR(TAG, errorMessage.c_str());
         baseNotifier->onError(this, ClientBaseErrorNotification::SUBSCRIPTION_FAILED, errorMessage);
     }
+    startNextAcceptedResult.complete(ioError);
 }
 
 void JobsFeature::ackSubscribeToStartNextJobRejected(int ioError)
@@ -88,6 +90,7 @@ void JobsFeature::ackSubscribeToStartNextJobRejected(int ioError)
         LOG_ERROR(TAG, errorMessage.c_str());
         baseNotifier->onError(this, ClientBaseErrorNotification::SUBSCRIPTION_FAILED, errorMessage);
     }
+    startNextRejectedResult.complete(ioError);
 }
 
 void JobsFeature::ackUpdateJobExecutionStatus(int ioError) const
@@ -105,7 +108,7 @@ void JobsFeature::ackSubscribeToUpdateJobExecutionAccepted(int ioError)
         LOG_ERROR(TAG, errorMessage.c_str());
         baseNotifier->onError(this, ClientBaseErrorNotification::SUBSCRIPTION_FAILED, errorMessage);
     }
-    updateAcceptedPromise.set_value(ioError);
+    updateAcceptedResult.complete(ioError);
 }
 
 void JobsFeature::ackSubscribeToUpdateJobExecutionRejected(int ioError)
@@ -118,7 +121,7 @@ void JobsFeature::ackSubscribeToUpdateJobExecutionRejected(int ioError)
         LOG_ERROR(TAG, errorMessage.c_str());
         baseNotifier->onError(this, ClientBaseErrorNotification::SUBSCRIPTION_FAILED, errorMessage);
     }
-    updateRejectedPromise.set_value(ioError);
+    updateRejectedResult.complete(ioError);
 }
 
 void JobsFeature::reportSubscriptionQueueFailure(const char *subscriptionName)
@@ -381,6 +384,7 @@ bool JobsFeature::subscribeToStartNextPendingJobExecution()
     if (!acceptedQueued)
     {
         reportSubscriptionQueueFailure("StartNextPendingJobExecution accepted");
+        startNextAcceptedResult.complete(SUBSCRIPTION_QUEUE_FAILED);
     }
 
     bool rejectedQueued = jobsClient->SubscribeToStartNextPendingJobExecutionRejected(
@@ -391,6 +395,7 @@ bool JobsFeature::subscribeToStartNextPendingJobExecution()
     if (!rejectedQueued)
     {
         reportSubscriptionQueueFailure("StartNextPendingJobExecution rejected");
+        startNextRejectedResult.complete(SUBSCRIPTION_QUEUE_FAILED);
     }
 
     return acceptedQueued && rejectedQueued;
@@ -414,6 +419,7 @@ bool JobsFeature::subscribeToNextJobChangedEvents()
     if (!queued)
     {
         reportSubscriptionQueueFailure("NextJobExecutionChanged events");
+        nextJobChangedResult.complete(SUBSCRIPTION_QUEUE_FAILED);
     }
     return queued;
 }
@@ -433,20 +439,9 @@ bool JobsFeature::subscribeToUpdateJobExecutionStatusAccepted(const string &jobI
     if (!queued)
     {
         reportSubscriptionQueueFailure("UpdateJobExecution accepted");
-        return false;
+        updateAcceptedResult.complete(SUBSCRIPTION_QUEUE_FAILED);
     }
-
-    auto subscriptionResult = updateAcceptedPromise.get_future();
-    if (std::future_status::timeout == subscriptionResult.wait_for(std::chrono::seconds(10)))
-    {
-        ostringstream errorMessage;
-        errorMessage
-            << "Timed out while waiting for acknowledgement of subscription to UpdateJobExecutionStatusAccepted";
-        LOG_ERROR(TAG, errorMessage.str().c_str());
-        baseNotifier->onError(this, ClientBaseErrorNotification::SUBSCRIPTION_FAILED, errorMessage.str());
-        return false;
-    }
-    return subscriptionResult.get() == 0;
+    return queued;
 }
 
 bool JobsFeature::subscribeToUpdateJobExecutionStatusRejected(const string &jobId)
@@ -464,20 +459,9 @@ bool JobsFeature::subscribeToUpdateJobExecutionStatusRejected(const string &jobI
     if (!queued)
     {
         reportSubscriptionQueueFailure("UpdateJobExecution rejected");
-        return false;
+        updateRejectedResult.complete(SUBSCRIPTION_QUEUE_FAILED);
     }
-
-    auto subscriptionResult = updateRejectedPromise.get_future();
-    if (std::future_status::timeout == subscriptionResult.wait_for(std::chrono::seconds(10)))
-    {
-        ostringstream errorMessage;
-        errorMessage
-            << "Timed out while waiting for acknowledgement of subscription to UpdateJobExecutionStatusRejected";
-        LOG_ERROR(TAG, errorMessage.str().c_str());
-        baseNotifier->onError(this, ClientBaseErrorNotification::SUBSCRIPTION_FAILED, errorMessage.str());
-        return false;
-    }
-    return subscriptionResult.get() == 0;
+    return queued;
 }
 
 /**
@@ -933,15 +917,54 @@ void JobsFeature::runJobs()
 
     jobsClient = createJobsClient();
 
+    auto startNextAcceptedFuture = startNextAcceptedResult.getFuture();
+    auto startNextRejectedFuture = startNextRejectedResult.getFuture();
+    auto nextJobChangedFuture = nextJobChangedResult.getFuture();
+    auto updateAcceptedFuture = updateAcceptedResult.getFuture();
+    auto updateRejectedFuture = updateRejectedResult.getFuture();
+
     // Create subscriptions to important MQTT topics
-    bool startNextSubscriptionsReady = subscribeToStartNextPendingJobExecution();
-    bool nextJobSubscriptionReady = subscribeToNextJobChangedEvents();
+    bool startNextSubscriptionsQueued = subscribeToStartNextPendingJobExecution();
+    bool nextJobSubscriptionQueued = subscribeToNextJobChangedEvents();
 
     // We want to be notified on any response to an UpdateJobExecution call
-    bool updateAcceptedSubscriptionReady = subscribeToUpdateJobExecutionStatusAccepted("+");
-    bool updateRejectedSubscriptionReady = subscribeToUpdateJobExecutionStatusRejected("+");
-    bool startupSubscriptionsReady = startNextSubscriptionsReady && nextJobSubscriptionReady &&
-                                     updateAcceptedSubscriptionReady && updateRejectedSubscriptionReady;
+    bool updateAcceptedSubscriptionQueued = subscribeToUpdateJobExecutionStatusAccepted("+");
+    bool updateRejectedSubscriptionQueued = subscribeToUpdateJobExecutionStatusRejected("+");
+
+    bool startupSubscriptionsReady = startNextSubscriptionsQueued && nextJobSubscriptionQueued &&
+                                     updateAcceptedSubscriptionQueued && updateRejectedSubscriptionQueued;
+    if (startupSubscriptionsReady)
+    {
+        auto startupSubscriptionDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+        auto waitForSubscriptionAcknowledgement =
+            [this, startupSubscriptionDeadline](std::future<int> &subscriptionResult, const char *subscriptionName) {
+                if (std::future_status::timeout == subscriptionResult.wait_until(startupSubscriptionDeadline))
+                {
+                    string errorMessage = FormatMessage(
+                        "Timed out while waiting for acknowledgement of the %s subscription during AWS IoT Jobs "
+                        "startup",
+                        subscriptionName);
+                    LOG_ERROR(TAG, errorMessage.c_str());
+                    baseNotifier->onError(this, ClientBaseErrorNotification::SUBSCRIPTION_FAILED, errorMessage);
+                    return false;
+                }
+                return subscriptionResult.get() == 0;
+            };
+
+        bool startNextAcceptedReady =
+            waitForSubscriptionAcknowledgement(startNextAcceptedFuture, "StartNextPendingJobExecution accepted");
+        bool startNextRejectedReady =
+            waitForSubscriptionAcknowledgement(startNextRejectedFuture, "StartNextPendingJobExecution rejected");
+        bool nextJobChangedReady =
+            waitForSubscriptionAcknowledgement(nextJobChangedFuture, "NextJobExecutionChanged events");
+        bool updateAcceptedReady =
+            waitForSubscriptionAcknowledgement(updateAcceptedFuture, "UpdateJobExecution accepted");
+        bool updateRejectedReady =
+            waitForSubscriptionAcknowledgement(updateRejectedFuture, "UpdateJobExecution rejected");
+
+        startupSubscriptionsReady = startNextAcceptedReady && startNextRejectedReady && nextJobChangedReady &&
+                                    updateAcceptedReady && updateRejectedReady;
+    }
 
     bool recoverSubscriptions = false;
     bool pollPendingJobs = false;

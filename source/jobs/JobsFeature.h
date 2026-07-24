@@ -18,6 +18,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <future>
 #include <memory>
 #include <mutex>
 
@@ -210,8 +211,24 @@ namespace Aws
                     void ackSubscribeToUpdateJobExecutionAccepted(int ioError);
                     void ackSubscribeToUpdateJobExecutionRejected(int ioError);
                     void reportSubscriptionQueueFailure(const char *subscriptionName);
-                    std::promise<int> updateAcceptedPromise;
-                    std::promise<int> updateRejectedPromise;
+
+                    struct StartupSubscriptionResult
+                    {
+                        std::promise<int> result;
+                        std::once_flag completionFlag;
+
+                        std::future<int> getFuture() { return result.get_future(); }
+                        void complete(int ioError)
+                        {
+                            std::call_once(completionFlag, [this, ioError]() { result.set_value(ioError); });
+                        }
+                    };
+
+                    StartupSubscriptionResult startNextAcceptedResult;
+                    StartupSubscriptionResult startNextRejectedResult;
+                    StartupSubscriptionResult nextJobChangedResult;
+                    StartupSubscriptionResult updateAcceptedResult;
+                    StartupSubscriptionResult updateRejectedResult;
 
                     // Outgoing Mqtt messages/topic subscriptions
                     /**
@@ -266,7 +283,7 @@ namespace Aws
                      * update is accepted
                      * @param jobId the job ID to listen for. Use "+" to subscribe for all job executions for this
                      * thing.
-                     * @return true when the subscription was queued and acknowledged successfully
+                     * @return true when the subscription request was queued
                      */
                     virtual bool subscribeToUpdateJobExecutionStatusAccepted(const std::string &jobId);
                     /**
@@ -274,7 +291,7 @@ namespace Aws
                      * update is rejected
                      * @param jobId the job ID to listen for. Use "+" to subscribe for all job executions for this
                      * thing.
-                     * @return true when the subscription was queued and acknowledged successfully
+                     * @return true when the subscription request was queued
                      */
                     virtual bool subscribeToUpdateJobExecutionStatusRejected(const std::string &jobId);
 
