@@ -178,6 +178,52 @@ TEST_F(TestSecureTunnelingFeature, PresentSessionDoesNotResubscribeTunnelNotific
     secureTunnelingFeature->onConnectionResumed(true);
 }
 
+TEST_F(TestSecureTunnelingFeature, PresentSessionRecoversInitialSubscriptionQueueFailure)
+{
+    Iotsecuretunneling::OnSubscribeComplete recoverySubAck;
+
+    EXPECT_CALL(*secureTunnelingFeature, createClient()).Times(1).WillOnce(Return(mockClient));
+    EXPECT_CALL(*mockClient, SubscribeToTunnelsNotify(ThingNameEq(thingName), AWS_MQTT_QOS_AT_LEAST_ONCE, _, _))
+        .Times(2)
+        .WillOnce(Return(false))
+        .WillOnce(DoAll(SaveArg<3>(&recoverySubAck), Return(true)));
+    EXPECT_CALL(*notifier, onEvent(secureTunnelingFeature.get(), ClientBaseEventNotification::FEATURE_STARTED))
+        .Times(1);
+
+    secureTunnelingFeature->init(manager, notifier, config);
+    secureTunnelingFeature->start();
+    secureTunnelingFeature->onConnectionResumed(true);
+
+    ASSERT_TRUE(recoverySubAck);
+    recoverySubAck(0);
+    secureTunnelingFeature->onConnectionResumed(true);
+}
+
+TEST_F(TestSecureTunnelingFeature, PresentSessionRecoversInitialSubscriptionSubAckFailure)
+{
+    Iotsecuretunneling::OnSubscribeComplete initialSubAck;
+    Iotsecuretunneling::OnSubscribeComplete recoverySubAck;
+
+    EXPECT_CALL(*secureTunnelingFeature, createClient()).Times(1).WillOnce(Return(mockClient));
+    EXPECT_CALL(*mockClient, SubscribeToTunnelsNotify(ThingNameEq(thingName), AWS_MQTT_QOS_AT_LEAST_ONCE, _, _))
+        .Times(2)
+        .WillOnce(DoAll(SaveArg<3>(&initialSubAck), Return(true)))
+        .WillOnce(DoAll(SaveArg<3>(&recoverySubAck), Return(true)));
+    EXPECT_CALL(*notifier, onEvent(secureTunnelingFeature.get(), ClientBaseEventNotification::FEATURE_STARTED))
+        .Times(1);
+
+    secureTunnelingFeature->init(manager, notifier, config);
+    secureTunnelingFeature->start();
+
+    ASSERT_TRUE(initialSubAck);
+    initialSubAck(42);
+    secureTunnelingFeature->onConnectionResumed(true);
+
+    ASSERT_TRUE(recoverySubAck);
+    recoverySubAck(0);
+    secureTunnelingFeature->onConnectionResumed(true);
+}
+
 TEST_F(TestSecureTunnelingFeature, CleanSessionHandlesImmediateSubscriptionQueueFailure)
 {
     EXPECT_CALL(*secureTunnelingFeature, createContext(_, _, _)).Times(0);

@@ -601,8 +601,14 @@ void JobsFeature::updateJobExecutionStatusRejectedHandler(Iotjobs::RejectedError
 {
     if (ioError)
     {
-        // Allow this proceed so it can be used to set the promise value and handle at the origin
         LOGM_ERROR(TAG, "Encountered ioError %d within updateJobExecutionStatusRejectedHandler", ioError);
+        return;
+    }
+
+    if (!rejectedError)
+    {
+        LOG_WARN(TAG, "Received an UpdateJobExecution rejected error with no response data");
+        return;
     }
 
     if (!rejectedError->ClientToken || !rejectedError->ClientToken.has_value())

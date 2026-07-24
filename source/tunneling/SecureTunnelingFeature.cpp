@@ -215,11 +215,13 @@ namespace Aws
                     if (mSubscribeNotification)
                     {
                         auto client = createClient();
+                        std::uint64_t subscriptionGeneration;
                         {
                             lock_guard<mutex> lock(mConnectionRecoveryLock);
                             iotSecureTunnelingClient = move(client);
+                            subscriptionGeneration = mConnectionRecoveryGeneration;
                         }
-                        SubscribeToTunnelNotifications(false, 0);
+                        SubscribeToTunnelNotifications(false, subscriptionGeneration);
                     }
                     else
                     {
@@ -264,6 +266,12 @@ namespace Aws
                         else
                         {
                             LOG_ERROR(TAG, "Couldn't queue tunnel notification subscription");
+                        }
+
+                        lock_guard<mutex> lock(mConnectionRecoveryLock);
+                        if (mStarted && recoveryGeneration == mConnectionRecoveryGeneration)
+                        {
+                            mSubscriptionNeedsRecovery = true;
                         }
                     }
 
@@ -363,9 +371,11 @@ namespace Aws
                         if (ioErr)
                         {
                             LOGM_ERROR(TAG, "Couldn't subscribe to tunnel notification topic. ioErr=%d", ioErr);
-                            // TODO: Handle subscription error
-
-                            // TODO: UA-5775 - Incorporate the baseClientNotifier onError event
+                            lock_guard<mutex> lock(mConnectionRecoveryLock);
+                            if (mStarted && recoveryGeneration == mConnectionRecoveryGeneration)
+                            {
+                                mSubscriptionNeedsRecovery = true;
+                            }
                         }
                         else
                         {

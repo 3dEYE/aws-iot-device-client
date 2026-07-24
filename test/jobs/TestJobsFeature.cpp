@@ -378,6 +378,7 @@ struct JobsRecoveryCallbacks
 {
     Iotjobs::OnSubscribeToStartNextPendingJobExecutionAcceptedResponse startNextAcceptedResponse;
     Iotjobs::OnSubscribeToNextJobExecutionChangedEventsResponse nextJobChangedResponse;
+    Iotjobs::OnSubscribeToUpdateJobExecutionRejectedResponse updateJobRejectedResponse;
     Iotjobs::OnSubscribeComplete startNextAccepted;
     Iotjobs::OnSubscribeComplete startNextRejected;
     Iotjobs::OnSubscribeComplete nextJobChanged;
@@ -421,7 +422,10 @@ static void expectJobsRecoverySubscriptions(
         *client,
         SubscribeToUpdateJobExecutionRejected(ThingNameEq(thingName), AWS_MQTT_QOS_AT_LEAST_ONCE, _, _))
         .Times(1)
-        .WillOnce(DoAll(SaveArg<3>(&callbacks.updateJobRejected), Return(true)));
+        .WillOnce(DoAll(
+            SaveArg<2>(&callbacks.updateJobRejectedResponse),
+            SaveArg<3>(&callbacks.updateJobRejected),
+            Return(true)));
 }
 
 TEST_F(TestJobsFeature, GetName)
@@ -1004,6 +1008,40 @@ TEST_F(TestJobsFeature, ConnectionResumedAfterSessionLossDoesNotPollWhenSubscrip
     NextJobExecutionChangedEvent nextJobEvent;
     nextJobEvent.Execution = Aws::Crt::Optional<JobExecutionData>(nextJob);
     callbacks.nextJobChangedResponse(&nextJobEvent, 0);
+}
+
+TEST_F(TestJobsFeature, RejectedRecoverySubscriptionErrorHandlesNullResponse)
+{
+    expectSuccessfulJobsStartup(*jobsMock, mockClient, ThingName);
+    jobsMock->init(std::shared_ptr<Mqtt::MqttConnection>(), notifier, config);
+    jobsMock->invokeRunJobs();
+    Mock::VerifyAndClearExpectations(mockClient.get());
+
+    JobsRecoveryCallbacks callbacks;
+    expectJobsRecoverySubscriptions(mockClient, ThingName, callbacks);
+    EXPECT_CALL(
+        *notifier,
+        onError(
+            jobsMock.get(),
+            ClientBaseErrorNotification::SUBSCRIPTION_FAILED,
+            AllOf(
+                HasSubstr("UpdateJobExecution rejected"),
+                HasSubstr("ioError {42}"))))
+        .Times(1);
+    EXPECT_CALL(*mockClient, PublishStartNextPendingJobExecution(_, _, _)).Times(0);
+
+    jobsMock->onConnectionResumed(false);
+
+    ASSERT_TRUE(callbacks.updateJobRejectedResponse);
+    ASSERT_TRUE(callbacks.updateJobRejected);
+    callbacks.startNextAccepted(0);
+    callbacks.startNextRejected(0);
+    callbacks.nextJobChanged(0);
+    callbacks.updateJobAccepted(0);
+
+    // The generated SDK invokes the response handler before the SUBACK callback on subscription failure.
+    callbacks.updateJobRejectedResponse(nullptr, 42);
+    callbacks.updateJobRejected(42);
 }
 
 TEST_F(TestJobsFeature, ExistingSessionResumeRestartsInterruptedSubscriptionRecovery)
