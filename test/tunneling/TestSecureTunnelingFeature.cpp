@@ -296,6 +296,57 @@ TEST_F(TestSecureTunnelingFeature, ExistingSessionResumeRestartsInterruptedSubsc
     secureTunnelingFeature->onConnectionResumed(true);
 }
 
+TEST_F(TestSecureTunnelingFeature, PreservedSessionAcceptsNotificationFromPendingRecoverySubscription)
+{
+    string accessToken = "12345";
+    string region = "us-west-2";
+    uint16_t port = 22;
+    Aws::Crt::Vector<Aws::Crt::String> services;
+    services.push_back("SSH");
+
+    response->ClientMode = "destination";
+    response->Services = services;
+    response->ClientAccessToken = accessToken.c_str();
+    response->Region = region.c_str();
+
+    bool contextCreated = false;
+    Iotsecuretunneling::OnSubscribeToTunnelsNotifyResponse lostSessionHandler;
+    Iotsecuretunneling::OnSubscribeToTunnelsNotifyResponse preservedRecoveryHandler;
+    Iotsecuretunneling::OnSubscribeComplete pendingRecoverySubAck;
+    Iotsecuretunneling::OnSubscribeComplete replacementRecoverySubAck;
+
+    EXPECT_CALL(*secureTunnelingFeature, createContext(StrEq(accessToken), StrEq(region), Eq(port)))
+        .Times(1)
+        .WillOnce(DoAll(Assign(&contextCreated, true), Return(ByMove(std::move(fakeContext)))));
+    EXPECT_CALL(*secureTunnelingFeature, createClient()).Times(1).WillOnce(Return(mockClient));
+    EXPECT_CALL(*mockClient, SubscribeToTunnelsNotify(ThingNameEq(thingName), AWS_MQTT_QOS_AT_LEAST_ONCE, _, _))
+        .Times(3)
+        .WillOnce(DoAll(SaveArg<2>(&lostSessionHandler), InvokeArgument<3>(0), Return(true)))
+        .WillOnce(
+            DoAll(SaveArg<2>(&preservedRecoveryHandler), SaveArg<3>(&pendingRecoverySubAck), Return(true)))
+        .WillOnce(DoAll(SaveArg<3>(&replacementRecoverySubAck), Return(true)));
+    EXPECT_CALL(*notifier, onEvent(secureTunnelingFeature.get(), ClientBaseEventNotification::FEATURE_STARTED))
+        .Times(1);
+
+    secureTunnelingFeature->init(manager, notifier, config);
+    secureTunnelingFeature->start();
+    secureTunnelingFeature->onConnectionResumed(false);
+    secureTunnelingFeature->onConnectionResumed(true);
+
+    ASSERT_TRUE(static_cast<bool>(lostSessionHandler));
+    ASSERT_TRUE(static_cast<bool>(preservedRecoveryHandler));
+    ASSERT_TRUE(static_cast<bool>(pendingRecoverySubAck));
+    ASSERT_TRUE(static_cast<bool>(replacementRecoverySubAck));
+    lostSessionHandler(response.get(), 0);
+    EXPECT_FALSE(contextCreated);
+    preservedRecoveryHandler(response.get(), 0);
+    EXPECT_TRUE(contextCreated);
+
+    replacementRecoverySubAck(0);
+    pendingRecoverySubAck(0);
+    secureTunnelingFeature->onConnectionResumed(true);
+}
+
 TEST_F(TestSecureTunnelingFeature, CleanSessionDoesNotSubscribeBeforeFeatureStarts)
 {
     EXPECT_CALL(*secureTunnelingFeature, createClient()).Times(0);

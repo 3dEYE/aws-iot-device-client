@@ -58,6 +58,7 @@ namespace Aws
                         mStarted = true;
                         mSubscriptionNeedsRecovery = false;
                         ++mConnectionRecoveryGeneration;
+                        mOldestValidSubscriptionGeneration = mConnectionRecoveryGeneration;
                     }
                     RunSecureTunneling();
                     auto self = static_cast<Feature *>(this);
@@ -74,6 +75,7 @@ namespace Aws
                         mStarted = false;
                         mSubscriptionNeedsRecovery = false;
                         ++mConnectionRecoveryGeneration;
+                        mOldestValidSubscriptionGeneration = mConnectionRecoveryGeneration;
                         ++mFeatureLifecycleGeneration;
                     }
                     for (auto &c : mContexts)
@@ -132,6 +134,10 @@ namespace Aws
                         }
 
                         recoveryGeneration = ++mConnectionRecoveryGeneration;
+                        if (!sessionPresent)
+                        {
+                            mOldestValidSubscriptionGeneration = recoveryGeneration;
+                        }
                     }
 
                     LOG_INFO(
@@ -290,9 +296,10 @@ namespace Aws
                     std::uint64_t featureLifecycleGeneration;
                     {
                         lock_guard<mutex> lock(mConnectionRecoveryLock);
-                        if (!mStarted || subscriptionGeneration != mConnectionRecoveryGeneration)
+                        if (!mStarted || subscriptionGeneration < mOldestValidSubscriptionGeneration ||
+                            subscriptionGeneration > mConnectionRecoveryGeneration)
                         {
-                            LOG_DEBUG(TAG, "Ignoring stale tunnel notification");
+                            LOG_DEBUG(TAG, "Ignoring tunnel notification from a stale MQTT session");
                             return;
                         }
                         featureLifecycleGeneration = mFeatureLifecycleGeneration;
