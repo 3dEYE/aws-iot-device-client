@@ -39,7 +39,7 @@ namespace Aws
                     const Iotsecuretunneling::OnSubscribeComplete &onSubAck)
                 {
                     return iotSecureTunnelingClient->SubscribeToTunnelsNotify(
-                        request, AWS_MQTT_QOS_AT_LEAST_ONCE, handler, onSubAck);
+                        request, qos, handler, onSubAck);
                 }
             } // namespace SecureTunneling
         }     // namespace DeviceClient
