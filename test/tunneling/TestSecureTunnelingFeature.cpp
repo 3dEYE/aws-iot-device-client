@@ -112,6 +112,29 @@ class MockSecureTunnelingFeature : public SecureTunnelingFeature
         (const std::string &accessToken, const std::string &region, const uint16_t &port),
         (override));
     MOCK_METHOD(std::shared_ptr<AbstractIotSecureTunnelingClient>, createClient, (), (override));
+
+    void scheduleDelayedSubscriptionRecoveryRetry(
+        std::function<void()> retry,
+        std::chrono::milliseconds delay) override
+    {
+        scheduledSubscriptionRecoveryRetry = retry;
+        scheduledSubscriptionRecoveryRetryDelay = delay;
+    }
+
+    bool hasScheduledSubscriptionRecoveryRetry() const
+    {
+        return static_cast<bool>(scheduledSubscriptionRecoveryRetry);
+    }
+
+    void invokeScheduledSubscriptionRecoveryRetry()
+    {
+        auto retry = scheduledSubscriptionRecoveryRetry;
+        scheduledSubscriptionRecoveryRetry = nullptr;
+        retry();
+    }
+
+    std::function<void()> scheduledSubscriptionRecoveryRetry;
+    std::chrono::milliseconds scheduledSubscriptionRecoveryRetryDelay{0};
 };
 
 class MockIotSecureTunnelingClient : public AbstractIotSecureTunnelingClient
@@ -231,6 +254,9 @@ TEST_F(TestSecureTunnelingFeature, PresentSessionRecoversInitialSubscriptionQueu
     ASSERT_TRUE(recoverySubAck);
     recoverySubAck(0);
     secureTunnelingFeature->onConnectionResumed(true);
+
+    ASSERT_TRUE(secureTunnelingFeature->hasScheduledSubscriptionRecoveryRetry());
+    secureTunnelingFeature->invokeScheduledSubscriptionRecoveryRetry();
 }
 
 TEST_F(TestSecureTunnelingFeature, PresentSessionRecoversInitialSubscriptionSubAckFailure)
@@ -260,17 +286,81 @@ TEST_F(TestSecureTunnelingFeature, PresentSessionRecoversInitialSubscriptionSubA
 
 TEST_F(TestSecureTunnelingFeature, CleanSessionHandlesImmediateSubscriptionQueueFailure)
 {
+    Iotsecuretunneling::OnSubscribeComplete retrySubAck;
+
     EXPECT_CALL(*secureTunnelingFeature, createContext(_, _, _)).Times(0);
     EXPECT_CALL(*secureTunnelingFeature, createClient()).Times(1).WillOnce(Return(mockClient));
     EXPECT_CALL(*mockClient, SubscribeToTunnelsNotify(ThingNameEq(thingName), AWS_MQTT_QOS_AT_LEAST_ONCE, _, _))
+        .Times(3)
         .WillOnce(DoAll(InvokeArgument<3>(0), Return(true)))
-        .WillOnce(Return(false));
+        .WillOnce(Return(false))
+        .WillOnce(DoAll(SaveArg<3>(&retrySubAck), Return(true)));
     EXPECT_CALL(*notifier, onEvent(secureTunnelingFeature.get(), ClientBaseEventNotification::FEATURE_STARTED))
         .Times(1);
 
     secureTunnelingFeature->init(manager, notifier, config);
     secureTunnelingFeature->start();
     secureTunnelingFeature->onConnectionResumed(false);
+
+    ASSERT_TRUE(secureTunnelingFeature->hasScheduledSubscriptionRecoveryRetry());
+    EXPECT_EQ(chrono::milliseconds(5000), secureTunnelingFeature->scheduledSubscriptionRecoveryRetryDelay);
+    secureTunnelingFeature->invokeScheduledSubscriptionRecoveryRetry();
+
+    ASSERT_TRUE(retrySubAck);
+    retrySubAck(0);
+    secureTunnelingFeature->onConnectionResumed(true);
+}
+
+TEST_F(TestSecureTunnelingFeature, FailedRecoverySubAckRetriesWithoutReconnect)
+{
+    Iotsecuretunneling::OnSubscribeComplete failedRecoverySubAck;
+    Iotsecuretunneling::OnSubscribeComplete retrySubAck;
+
+    EXPECT_CALL(*secureTunnelingFeature, createContext(_, _, _)).Times(0);
+    EXPECT_CALL(*secureTunnelingFeature, createClient()).Times(1).WillOnce(Return(mockClient));
+    EXPECT_CALL(*mockClient, SubscribeToTunnelsNotify(ThingNameEq(thingName), AWS_MQTT_QOS_AT_LEAST_ONCE, _, _))
+        .Times(3)
+        .WillOnce(DoAll(InvokeArgument<3>(0), Return(true)))
+        .WillOnce(DoAll(SaveArg<3>(&failedRecoverySubAck), Return(true)))
+        .WillOnce(DoAll(SaveArg<3>(&retrySubAck), Return(true)));
+    EXPECT_CALL(*notifier, onEvent(secureTunnelingFeature.get(), ClientBaseEventNotification::FEATURE_STARTED))
+        .Times(1);
+
+    secureTunnelingFeature->init(manager, notifier, config);
+    secureTunnelingFeature->start();
+    secureTunnelingFeature->onConnectionResumed(false);
+
+    ASSERT_TRUE(failedRecoverySubAck);
+    failedRecoverySubAck(42);
+
+    ASSERT_TRUE(secureTunnelingFeature->hasScheduledSubscriptionRecoveryRetry());
+    secureTunnelingFeature->invokeScheduledSubscriptionRecoveryRetry();
+
+    ASSERT_TRUE(retrySubAck);
+    retrySubAck(0);
+    secureTunnelingFeature->onConnectionResumed(true);
+}
+
+TEST_F(TestSecureTunnelingFeature, ScheduledRecoveryRetryAfterStopIsIgnored)
+{
+    EXPECT_CALL(*secureTunnelingFeature, createContext(_, _, _)).Times(0);
+    EXPECT_CALL(*secureTunnelingFeature, createClient()).Times(1).WillOnce(Return(mockClient));
+    EXPECT_CALL(*mockClient, SubscribeToTunnelsNotify(ThingNameEq(thingName), AWS_MQTT_QOS_AT_LEAST_ONCE, _, _))
+        .Times(2)
+        .WillOnce(DoAll(InvokeArgument<3>(0), Return(true)))
+        .WillOnce(Return(false));
+    EXPECT_CALL(*notifier, onEvent(secureTunnelingFeature.get(), ClientBaseEventNotification::FEATURE_STARTED))
+        .Times(1);
+    EXPECT_CALL(*notifier, onEvent(secureTunnelingFeature.get(), ClientBaseEventNotification::FEATURE_STOPPED))
+        .Times(1);
+
+    secureTunnelingFeature->init(manager, notifier, config);
+    secureTunnelingFeature->start();
+    secureTunnelingFeature->onConnectionResumed(false);
+
+    ASSERT_TRUE(secureTunnelingFeature->hasScheduledSubscriptionRecoveryRetry());
+    secureTunnelingFeature->stop();
+    secureTunnelingFeature->invokeScheduledSubscriptionRecoveryRetry();
 }
 
 TEST_F(TestSecureTunnelingFeature, ExistingSessionResumeRestartsInterruptedSubscriptionRecovery)

@@ -12,7 +12,9 @@
 #include "aws/crt/http/HttpProxyStrategy.h"
 #include <aws/iotdevicecommon/IotDevice.h>
 #include <aws/iotsecuretunneling/SecureTunnelingNotifyResponse.h>
+#include <chrono>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <mutex>
 
@@ -126,6 +128,23 @@ namespace Aws
                         int ioErr,
                         bool isRecovery,
                         std::uint64_t recoveryGeneration);
+
+                    /**
+                     * \brief Schedules another tunnel notification subscription recovery attempt
+                     */
+                    void requestSubscriptionRecoveryRetry(std::uint64_t failedRecoveryGeneration);
+
+                    /**
+                     * \brief Starts another recovery attempt if the failed attempt is still current
+                     */
+                    void retrySubscriptionRecovery(std::uint64_t failedRecoveryGeneration);
+
+                    /**
+                     * \brief Dispatches a delayed recovery task; virtual to allow deterministic tests
+                     */
+                    virtual void scheduleDelayedSubscriptionRecoveryRetry(
+                        std::function<void()> retry,
+                        std::chrono::milliseconds delay);
 
                     /**
                      * \brief Get the secure tunneling data plain endpoint given an AWS region

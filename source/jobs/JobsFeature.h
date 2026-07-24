@@ -17,6 +17,7 @@
 #include "JobEngine.h"
 
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <functional>
 #include <future>
@@ -278,6 +279,23 @@ namespace Aws
                         std::uint8_t subscriptionMask,
                         const char *subscriptionName,
                         int ioError);
+
+                    /**
+                     * \brief Schedules another recovery attempt after a failed subscription batch
+                     */
+                    void requestSubscriptionRecoveryRetry(std::uint64_t failedRecoveryGeneration);
+
+                    /**
+                     * \brief Starts another recovery batch if the failed attempt is still current
+                     */
+                    void retrySubscriptionRecovery(std::uint64_t failedRecoveryGeneration);
+
+                    /**
+                     * \brief Dispatches a delayed recovery task; virtual to allow deterministic tests
+                     */
+                    virtual void scheduleDelayedSubscriptionRecoveryRetry(
+                        std::function<void()> retry,
+                        std::chrono::milliseconds delay);
 
                     /**
                      * \brief Attempts to update a job execution to the provided status

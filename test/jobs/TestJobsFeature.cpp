@@ -266,6 +266,29 @@ class MockJobsFeature : public JobsFeature
          (const Aws::Crt::Map<Aws::Crt::String, Aws::Crt::String> &statusDetails),
          const std::function<void(void)> &onCompleteCallback),
         (override));
+
+    void scheduleDelayedSubscriptionRecoveryRetry(
+        std::function<void()> retry,
+        std::chrono::milliseconds delay) override
+    {
+        scheduledSubscriptionRecoveryRetry = retry;
+        scheduledSubscriptionRecoveryRetryDelay = delay;
+    }
+
+    bool hasScheduledSubscriptionRecoveryRetry() const
+    {
+        return static_cast<bool>(scheduledSubscriptionRecoveryRetry);
+    }
+
+    void invokeScheduledSubscriptionRecoveryRetry()
+    {
+        auto retry = scheduledSubscriptionRecoveryRetry;
+        scheduledSubscriptionRecoveryRetry = nullptr;
+        retry();
+    }
+
+    std::function<void()> scheduledSubscriptionRecoveryRetry;
+    std::chrono::milliseconds scheduledSubscriptionRecoveryRetryDelay{0};
 };
 
 class TestJobsFeature : public ::testing::Test
@@ -1022,7 +1045,7 @@ TEST_F(TestJobsFeature, SessionLossDuringStartupRecoversSubscriptionsBeforePolli
     EXPECT_EQ(1, publishCount);
 }
 
-TEST_F(TestJobsFeature, ConnectionResumedAfterSessionLossDoesNotPollWhenSubscriptionSubmissionFails)
+TEST_F(TestJobsFeature, ConnectionResumedAfterSessionLossRetriesWhenSubscriptionSubmissionFails)
 {
     expectSuccessfulJobsStartup(*jobsMock, mockClient, ThingName);
     jobsMock->init(std::shared_ptr<Mqtt::MqttConnection>(), notifier, config);
@@ -1051,6 +1074,60 @@ TEST_F(TestJobsFeature, ConnectionResumedAfterSessionLossDoesNotPollWhenSubscrip
 
     // A misbehaving implementation that invokes the callback despite returning false must not be double-counted.
     callbacks.startNextAccepted(0);
+
+    ASSERT_TRUE(jobsMock->hasScheduledSubscriptionRecoveryRetry());
+    EXPECT_EQ(chrono::milliseconds(5000), jobsMock->scheduledSubscriptionRecoveryRetryDelay);
+
+    Mock::VerifyAndClearExpectations(mockClient.get());
+
+    JobsRecoveryCallbacks retryCallbacks;
+    expectJobsRecoverySubscriptions(mockClient, ThingName, retryCallbacks);
+    EXPECT_CALL(*mockClient, PublishStartNextPendingJobExecution(_, _, _)).Times(0);
+    jobsMock->invokeScheduledSubscriptionRecoveryRetry();
+
+    retryCallbacks.startNextAccepted(0);
+    retryCallbacks.startNextRejected(0);
+    retryCallbacks.nextJobChanged(0);
+    retryCallbacks.updateJobAccepted(0);
+
+    Mock::VerifyAndClearExpectations(mockClient.get());
+    EXPECT_CALL(
+        *mockClient,
+        PublishStartNextPendingJobExecution(ThingNameEq(ThingName), AWS_MQTT_QOS_AT_LEAST_ONCE, _))
+        .Times(1)
+        .WillOnce(InvokeArgument<2>(0));
+    retryCallbacks.updateJobRejected(0);
+}
+
+TEST_F(TestJobsFeature, ScheduledSubscriptionRecoveryRetryAfterStopIsIgnored)
+{
+    expectSuccessfulJobsStartup(*jobsMock, mockClient, ThingName);
+    jobsMock->init(std::shared_ptr<Mqtt::MqttConnection>(), notifier, config);
+    jobsMock->invokeRunJobs();
+    Mock::VerifyAndClearExpectations(mockClient.get());
+
+    JobsRecoveryCallbacks callbacks;
+    expectJobsRecoverySubscriptions(mockClient, ThingName, callbacks, false);
+    EXPECT_CALL(*notifier, onError(jobsMock.get(), ClientBaseErrorNotification::SUBSCRIPTION_FAILED, _)).Times(1);
+    EXPECT_CALL(*mockClient, PublishStartNextPendingJobExecution(_, _, _)).Times(0);
+
+    jobsMock->onConnectionResumed(false);
+    callbacks.startNextRejected(0);
+    callbacks.nextJobChanged(0);
+    callbacks.updateJobAccepted(0);
+    callbacks.updateJobRejected(0);
+
+    ASSERT_TRUE(jobsMock->hasScheduledSubscriptionRecoveryRetry());
+    Mock::VerifyAndClearExpectations(mockClient.get());
+
+    EXPECT_CALL(*notifier, onEvent(jobsMock.get(), ClientBaseEventNotification::FEATURE_STOPPED)).Times(1);
+    jobsMock->stop();
+    EXPECT_CALL(*mockClient, SubscribeToStartNextPendingJobExecutionAccepted(_, _, _, _)).Times(0);
+    EXPECT_CALL(*mockClient, SubscribeToStartNextPendingJobExecutionRejected(_, _, _, _)).Times(0);
+    EXPECT_CALL(*mockClient, SubscribeToNextJobExecutionChangedEvents(_, _, _, _)).Times(0);
+    EXPECT_CALL(*mockClient, SubscribeToUpdateJobExecutionAccepted(_, _, _, _)).Times(0);
+    EXPECT_CALL(*mockClient, SubscribeToUpdateJobExecutionRejected(_, _, _, _)).Times(0);
+    jobsMock->invokeScheduledSubscriptionRecoveryRetry();
 }
 
 TEST_F(TestJobsFeature, ConnectionResumedAfterSessionLossDoesNotPollWhenSubscriptionCallbackFails)
@@ -1082,6 +1159,8 @@ TEST_F(TestJobsFeature, ConnectionResumedAfterSessionLossDoesNotPollWhenSubscrip
     callbacks.updateJobAccepted(42);
     callbacks.updateJobRejected(0);
 
+    ASSERT_TRUE(jobsMock->hasScheduledSubscriptionRecoveryRetry());
+    EXPECT_EQ(chrono::milliseconds(5000), jobsMock->scheduledSubscriptionRecoveryRetryDelay);
     ASSERT_TRUE(callbacks.startNextAcceptedResponse);
     ASSERT_TRUE(callbacks.nextJobChangedResponse);
 
@@ -1093,6 +1172,39 @@ TEST_F(TestJobsFeature, ConnectionResumedAfterSessionLossDoesNotPollWhenSubscrip
     NextJobExecutionChangedEvent nextJobEvent;
     nextJobEvent.Execution = Aws::Crt::Optional<JobExecutionData>(nextJob);
     callbacks.nextJobChangedResponse(&nextJobEvent, 0);
+
+    Mock::VerifyAndClearExpectations(mockClient.get());
+
+    JobsRecoveryCallbacks retryCallbacks;
+    expectJobsRecoverySubscriptions(mockClient, ThingName, retryCallbacks);
+    int publishCount = 0;
+    EXPECT_CALL(
+        *mockClient,
+        PublishStartNextPendingJobExecution(ThingNameEq(ThingName), AWS_MQTT_QOS_AT_LEAST_ONCE, _))
+        .Times(1)
+        .WillOnce(Invoke(
+            [&publishCount](
+                const StartNextPendingJobExecutionRequest &,
+                Aws::Crt::Mqtt::QOS,
+                const Iotjobs::OnPublishComplete &onPubAck) {
+                ++publishCount;
+                onPubAck(0);
+            }));
+
+    jobsMock->invokeScheduledSubscriptionRecoveryRetry();
+
+    ASSERT_TRUE(retryCallbacks.startNextAccepted);
+    ASSERT_TRUE(retryCallbacks.startNextRejected);
+    ASSERT_TRUE(retryCallbacks.nextJobChanged);
+    ASSERT_TRUE(retryCallbacks.updateJobAccepted);
+    ASSERT_TRUE(retryCallbacks.updateJobRejected);
+    retryCallbacks.startNextAccepted(0);
+    retryCallbacks.startNextRejected(0);
+    retryCallbacks.nextJobChanged(0);
+    retryCallbacks.updateJobAccepted(0);
+    EXPECT_EQ(0, publishCount);
+    retryCallbacks.updateJobRejected(0);
+    EXPECT_EQ(1, publishCount);
 }
 
 TEST_F(TestJobsFeature, RejectedRecoverySubscriptionErrorHandlesNullResponse)

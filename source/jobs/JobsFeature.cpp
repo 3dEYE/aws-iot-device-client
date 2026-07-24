@@ -46,6 +46,7 @@ namespace
     constexpr std::uint8_t UPDATE_JOB_ACCEPTED_SUBSCRIPTION = 1U << 3U;
     constexpr std::uint8_t UPDATE_JOB_REJECTED_SUBSCRIPTION = 1U << 4U;
     constexpr int SUBSCRIPTION_QUEUE_FAILED = -1;
+    constexpr long SUBSCRIPTION_RECOVERY_RETRY_DELAY_MILLIS = 5 * 1000;
 } // namespace
 
 string JobsFeature::getName()
@@ -300,6 +301,7 @@ void JobsFeature::completeRecoverySubscription(
     int ioError)
 {
     string errorMessage;
+    bool retryRecovery = false;
     {
         std::lock_guard<std::mutex> lock(connectionRecoveryLock);
         if (needStop.load() || !jobsClientReady || recoveryGeneration != connectionRecoveryGeneration ||
@@ -349,6 +351,7 @@ void JobsFeature::completeRecoverySubscription(
             else
             {
                 LOG_ERROR(TAG, "AWS IoT Jobs subscription recovery did not complete successfully");
+                retryRecovery = true;
             }
         }
     }
@@ -358,6 +361,71 @@ void JobsFeature::completeRecoverySubscription(
         LOG_ERROR(TAG, errorMessage.c_str());
         baseNotifier->onError(this, ClientBaseErrorNotification::SUBSCRIPTION_FAILED, errorMessage);
     }
+
+    if (retryRecovery)
+    {
+        requestSubscriptionRecoveryRetry(recoveryGeneration);
+    }
+}
+
+void JobsFeature::requestSubscriptionRecoveryRetry(std::uint64_t failedRecoveryGeneration)
+{
+    {
+        std::lock_guard<std::mutex> lock(connectionRecoveryLock);
+        if (needStop.load() || !jobsClientReady || !subscriptionsNeedRecovery ||
+            failedRecoveryGeneration != connectionRecoveryGeneration || pendingRecoverySubscriptions != 0)
+        {
+            return;
+        }
+    }
+
+    LOGM_INFO(
+        TAG,
+        "Retrying AWS IoT Jobs subscription recovery in %ld milliseconds",
+        SUBSCRIPTION_RECOVERY_RETRY_DELAY_MILLIS);
+    std::weak_ptr<JobsFeature> weakSelf = shared_from_this();
+    scheduleDelayedSubscriptionRecoveryRetry(
+        [weakSelf, failedRecoveryGeneration]() {
+            auto self = weakSelf.lock();
+            if (self)
+            {
+                self->retrySubscriptionRecovery(failedRecoveryGeneration);
+            }
+        },
+        std::chrono::milliseconds(SUBSCRIPTION_RECOVERY_RETRY_DELAY_MILLIS));
+}
+
+void JobsFeature::retrySubscriptionRecovery(std::uint64_t failedRecoveryGeneration)
+{
+    std::lock_guard<std::mutex> subscriptionLifecycleGuard(subscriptionLifecycleLock);
+    std::uint64_t recoveryGeneration;
+    {
+        std::lock_guard<std::mutex> lock(connectionRecoveryLock);
+        if (needStop.load() || !jobsClientReady || !subscriptionsNeedRecovery ||
+            failedRecoveryGeneration != connectionRecoveryGeneration || pendingRecoverySubscriptions != 0)
+        {
+            return;
+        }
+
+        recoveryGeneration = ++connectionRecoveryGeneration;
+        pendingRecoverySubscriptions = JOBS_SUBSCRIPTION_COUNT;
+        connectionRecoveryFailed = false;
+        completedRecoverySubscriptionMask = 0;
+    }
+
+    LOG_INFO(TAG, "Retrying AWS IoT Jobs subscription recovery");
+    resubscribeAfterSessionLoss(recoveryGeneration);
+}
+
+void JobsFeature::scheduleDelayedSubscriptionRecoveryRetry(
+    std::function<void()> retry,
+    std::chrono::milliseconds delay)
+{
+    std::thread retryThread([retry, delay]() {
+        std::this_thread::sleep_for(delay);
+        retry();
+    });
+    retryThread.detach();
 }
 
 /**

@@ -28,6 +28,7 @@ namespace Aws
                 constexpr char SecureTunnelingFeature::TAG[];
                 constexpr char SecureTunnelingFeature::NAME[];
                 constexpr char SecureTunnelingFeature::DEFAULT_PROXY_ENDPOINT_HOST_FORMAT[];
+                constexpr long SUBSCRIPTION_RECOVERY_RETRY_DELAY_MILLIS = 5 * 1000;
                 std::map<std::string, uint16_t> SecureTunnelingFeature::mServiceToPortMap;
 
                 SecureTunnelingFeature::SecureTunnelingFeature() = default;
@@ -283,10 +284,18 @@ namespace Aws
                             LOG_ERROR(TAG, "Couldn't queue tunnel notification subscription");
                         }
 
-                        lock_guard<mutex> lock(mConnectionRecoveryLock);
-                        if (mStarted && recoveryGeneration == mConnectionRecoveryGeneration)
+                        bool retryRecovery = false;
                         {
-                            mSubscriptionNeedsRecovery = true;
+                            lock_guard<mutex> lock(mConnectionRecoveryLock);
+                            if (mStarted && recoveryGeneration == mConnectionRecoveryGeneration)
+                            {
+                                mSubscriptionNeedsRecovery = true;
+                                retryRecovery = true;
+                            }
+                        }
+                        if (retryRecovery)
+                        {
+                            requestSubscriptionRecoveryRetry(recoveryGeneration);
                         }
                     }
 
@@ -409,10 +418,18 @@ namespace Aws
                         if (ioErr)
                         {
                             LOGM_ERROR(TAG, "Couldn't subscribe to tunnel notification topic. ioErr=%d", ioErr);
-                            lock_guard<mutex> lock(mConnectionRecoveryLock);
-                            if (mStarted && recoveryGeneration == mConnectionRecoveryGeneration)
+                            bool retryRecovery = false;
                             {
-                                mSubscriptionNeedsRecovery = true;
+                                lock_guard<mutex> lock(mConnectionRecoveryLock);
+                                if (mStarted && recoveryGeneration == mConnectionRecoveryGeneration)
+                                {
+                                    mSubscriptionNeedsRecovery = true;
+                                    retryRecovery = true;
+                                }
+                            }
+                            if (retryRecovery)
+                            {
+                                requestSubscriptionRecoveryRetry(recoveryGeneration);
                             }
                         }
                         else
@@ -422,22 +439,85 @@ namespace Aws
                         return;
                     }
 
-                    lock_guard<mutex> lock(mConnectionRecoveryLock);
-                    if (!mStarted || recoveryGeneration != mConnectionRecoveryGeneration ||
-                        !mSubscriptionNeedsRecovery)
                     {
-                        LOG_DEBUG(TAG, "Ignoring stale tunnel notification subscription recovery callback");
-                        return;
+                        lock_guard<mutex> lock(mConnectionRecoveryLock);
+                        if (!mStarted || recoveryGeneration != mConnectionRecoveryGeneration ||
+                            !mSubscriptionNeedsRecovery)
+                        {
+                            LOG_DEBUG(TAG, "Ignoring stale tunnel notification subscription recovery callback");
+                            return;
+                        }
+
+                        if (!ioErr)
+                        {
+                            mSubscriptionNeedsRecovery = false;
+                            LOG_INFO(TAG, "Restored tunnel notification subscription");
+                            return;
+                        }
                     }
 
-                    if (ioErr)
+                    LOGM_ERROR(TAG, "Couldn't restore tunnel notification subscription. ioErr=%d", ioErr);
+                    requestSubscriptionRecoveryRetry(recoveryGeneration);
+                }
+
+                void SecureTunnelingFeature::requestSubscriptionRecoveryRetry(
+                    std::uint64_t failedRecoveryGeneration)
+                {
                     {
-                        LOGM_ERROR(TAG, "Couldn't restore tunnel notification subscription. ioErr=%d", ioErr);
-                        return;
+                        lock_guard<mutex> lock(mConnectionRecoveryLock);
+                        if (!mStarted || !mSubscribeNotification || !iotSecureTunnelingClient ||
+                            !mSubscriptionNeedsRecovery ||
+                            failedRecoveryGeneration != mConnectionRecoveryGeneration)
+                        {
+                            return;
+                        }
                     }
 
-                    mSubscriptionNeedsRecovery = false;
-                    LOG_INFO(TAG, "Restored tunnel notification subscription");
+                    LOGM_INFO(
+                        TAG,
+                        "Retrying tunnel notification subscription recovery in %ld milliseconds",
+                        SUBSCRIPTION_RECOVERY_RETRY_DELAY_MILLIS);
+                    weak_ptr<SecureTunnelingFeature> weakSelf = shared_from_this();
+                    scheduleDelayedSubscriptionRecoveryRetry(
+                        [weakSelf, failedRecoveryGeneration]() {
+                            auto self = weakSelf.lock();
+                            if (self)
+                            {
+                                self->retrySubscriptionRecovery(failedRecoveryGeneration);
+                            }
+                        },
+                        std::chrono::milliseconds(SUBSCRIPTION_RECOVERY_RETRY_DELAY_MILLIS));
+                }
+
+                void SecureTunnelingFeature::retrySubscriptionRecovery(std::uint64_t failedRecoveryGeneration)
+                {
+                    lock_guard<mutex> subscriptionLifecycleLock(mSubscriptionLifecycleLock);
+                    std::uint64_t recoveryGeneration;
+                    {
+                        lock_guard<mutex> lock(mConnectionRecoveryLock);
+                        if (!mStarted || !mSubscribeNotification || !iotSecureTunnelingClient ||
+                            !mSubscriptionNeedsRecovery ||
+                            failedRecoveryGeneration != mConnectionRecoveryGeneration)
+                        {
+                            return;
+                        }
+
+                        recoveryGeneration = ++mConnectionRecoveryGeneration;
+                    }
+
+                    LOG_INFO(TAG, "Retrying tunnel notification subscription recovery");
+                    SubscribeToTunnelNotifications(true, recoveryGeneration);
+                }
+
+                void SecureTunnelingFeature::scheduleDelayedSubscriptionRecoveryRetry(
+                    std::function<void()> retry,
+                    std::chrono::milliseconds delay)
+                {
+                    std::thread retryThread([retry, delay]() {
+                        std::this_thread::sleep_for(delay);
+                        retry();
+                    });
+                    retryThread.detach();
                 }
 
                 string SecureTunnelingFeature::GetEndpoint(const string &region)
