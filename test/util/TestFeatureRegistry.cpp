@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #include <memory>
+#include <stdexcept>
 
 #include "../../source/FeatureRegistry.h"
 #include "../../source/config/Config.h"
@@ -14,7 +15,10 @@ using namespace Aws::Iot::DeviceClient::Util;
 class FakeFeature : public Feature
 {
   public:
-    FakeFeature(const std::string &name) : name(name) {}
+    FakeFeature(const std::string &name, bool throwOnConnectionResumed = false)
+        : name(name), started(false), stopped(false), throwOnConnectionResumed(throwOnConnectionResumed)
+    {
+    }
     int start() override
     {
         started = true;
@@ -27,14 +31,28 @@ class FakeFeature : public Feature
         started = false;
         return 0;
     }
+    void onConnectionResumed(bool sessionPresent) override
+    {
+        if (throwOnConnectionResumed)
+        {
+            throw std::runtime_error("connection resume failure");
+        }
+        ++connectionResumedCount;
+        lastSessionPresent = sessionPresent;
+    }
     std::string getName() { return name; }
     bool isStarted() { return started; }
     bool isStopped() { return stopped; }
+    int getConnectionResumedCount() { return connectionResumedCount; }
+    bool wasSessionPresent() { return lastSessionPresent; }
 
   private:
     std::string name;
     bool started;
     bool stopped;
+    int connectionResumedCount{0};
+    bool lastSessionPresent{false};
+    bool throwOnConnectionResumed{false};
 };
 
 class TestFeatureRegistry : public ::testing::Test
@@ -154,4 +172,29 @@ TEST_F(TestFeatureRegistry, StopAllFeatures)
     ASSERT_EQ(nullptr, features->get(feature1->getName()));
     ASSERT_EQ(nullptr, features->get(feature2->getName()));
     ASSERT_EQ(nullptr, features->get(feature3->getName()));
+}
+
+TEST_F(TestFeatureRegistry, ConnectionResumedNotifiesActiveFeatures)
+{
+    features->add(feature1->getName(), feature1);
+    features->add(feature2->getName(), feature2);
+    features->disable(feature2->getName());
+
+    features->onConnectionResumed(false);
+
+    ASSERT_EQ(1, feature1->getConnectionResumedCount());
+    ASSERT_FALSE(feature1->wasSessionPresent());
+    ASSERT_EQ(0, feature2->getConnectionResumedCount());
+}
+
+TEST_F(TestFeatureRegistry, ConnectionResumedContinuesAfterFeatureThrows)
+{
+    auto throwingFeature = make_shared<FakeFeature>("a-throwing-feature", true);
+    features->add(throwingFeature->getName(), throwingFeature);
+    features->add(feature1->getName(), feature1);
+
+    features->onConnectionResumed(true);
+
+    ASSERT_EQ(1, feature1->getConnectionResumedCount());
+    ASSERT_TRUE(feature1->wasSessionPresent());
 }

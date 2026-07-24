@@ -36,6 +36,16 @@ using namespace Aws::Iotjobs;
 constexpr char JobsFeature::NAME[];
 const std::string JobsFeature::DEFAULT_JOBS_HANDLER_DIR = "~/.aws-iot-device-client/jobs/";
 
+namespace
+{
+    constexpr size_t JOBS_SUBSCRIPTION_COUNT = 5;
+    constexpr std::uint8_t START_NEXT_ACCEPTED_SUBSCRIPTION = 1U << 0U;
+    constexpr std::uint8_t START_NEXT_REJECTED_SUBSCRIPTION = 1U << 1U;
+    constexpr std::uint8_t NEXT_JOB_CHANGED_SUBSCRIPTION = 1U << 2U;
+    constexpr std::uint8_t UPDATE_JOB_ACCEPTED_SUBSCRIPTION = 1U << 3U;
+    constexpr std::uint8_t UPDATE_JOB_REJECTED_SUBSCRIPTION = 1U << 4U;
+} // namespace
+
 string JobsFeature::getName()
 {
     return NAME;
@@ -52,11 +62,6 @@ void JobsFeature::ackSubscribeToNextJobChanged(int ioError)
         LOG_ERROR(TAG, errorMessage.c_str());
         baseNotifier->onError(this, ClientBaseErrorNotification::SUBSCRIPTION_FAILED, errorMessage);
     }
-}
-
-void JobsFeature::ackStartNextPendingJobPub(int ioError) const
-{
-    LOGM_DEBUG(TAG, "Ack received for StartNextPendingJobPub with code {%d}", ioError);
 }
 
 void JobsFeature::ackSubscribeToStartNextJobAccepted(int ioError)
@@ -125,7 +130,203 @@ void JobsFeature::publishStartNextPendingJobExecutionRequest()
     jobsClient->PublishStartNextPendingJobExecution(
         startNextRequest,
         AWS_MQTT_QOS_AT_LEAST_ONCE,
-        std::bind(&JobsFeature::ackStartNextPendingJobPub, this, std::placeholders::_1));
+        [](int ioError) {
+            LOGM_DEBUG("JobsFeature.cpp", "Ack received for StartNextPendingJobPub with code {%d}", ioError);
+        });
+}
+
+void JobsFeature::onConnectionResumed(bool sessionPresent)
+{
+    std::uint64_t recoveryGeneration;
+    {
+        std::lock_guard<std::mutex> lock(connectionRecoveryLock);
+        if (needStop.load())
+        {
+            return;
+        }
+
+        if (!sessionPresent)
+        {
+            subscriptionsNeedRecovery = true;
+        }
+
+        if (!jobsClientReady)
+        {
+            return;
+        }
+
+        recoveryGeneration = ++connectionRecoveryGeneration;
+        pendingRecoverySubscriptions = 0;
+        connectionRecoveryFailed = false;
+        completedRecoverySubscriptions = 0;
+
+        if (!subscriptionsNeedRecovery)
+        {
+            LOG_INFO(TAG, "MQTT connection resumed with the existing session; checking for pending AWS IoT Jobs");
+            publishStartNextPendingJobExecutionRequest();
+            return;
+        }
+
+        pendingRecoverySubscriptions = JOBS_SUBSCRIPTION_COUNT;
+    }
+
+    LOG_INFO(TAG, "Recreating AWS IoT Jobs subscriptions after interrupted or lost MQTT session recovery");
+    resubscribeAfterSessionLoss(recoveryGeneration);
+}
+
+void JobsFeature::resubscribeAfterSessionLoss(std::uint64_t recoveryGeneration)
+{
+    StartNextPendingJobExecutionSubscriptionRequest startNextRequest;
+    startNextRequest.ThingName = thingName.c_str();
+
+    if (!jobsClient->SubscribeToStartNextPendingJobExecutionAccepted(
+            startNextRequest,
+            AWS_MQTT_QOS_AT_LEAST_ONCE,
+            std::bind(
+                &JobsFeature::startNextPendingJobReceivedHandler, this, std::placeholders::_1, std::placeholders::_2),
+            [this, recoveryGeneration](int ioError) {
+                completeRecoverySubscription(
+                    recoveryGeneration,
+                    START_NEXT_ACCEPTED_SUBSCRIPTION,
+                    "StartNextPendingJobExecution accepted",
+                    ioError);
+            }))
+    {
+        completeRecoverySubscription(
+            recoveryGeneration,
+            START_NEXT_ACCEPTED_SUBSCRIPTION,
+            "StartNextPendingJobExecution accepted",
+            -1);
+    }
+
+    if (!jobsClient->SubscribeToStartNextPendingJobExecutionRejected(
+            startNextRequest,
+            AWS_MQTT_QOS_AT_LEAST_ONCE,
+            std::bind(
+                &JobsFeature::startNextPendingJobRejectedHandler, this, std::placeholders::_1, std::placeholders::_2),
+            [this, recoveryGeneration](int ioError) {
+                completeRecoverySubscription(
+                    recoveryGeneration,
+                    START_NEXT_REJECTED_SUBSCRIPTION,
+                    "StartNextPendingJobExecution rejected",
+                    ioError);
+            }))
+    {
+        completeRecoverySubscription(
+            recoveryGeneration,
+            START_NEXT_REJECTED_SUBSCRIPTION,
+            "StartNextPendingJobExecution rejected",
+            -1);
+    }
+
+    NextJobExecutionChangedSubscriptionRequest nextJobRequest;
+    nextJobRequest.ThingName = thingName.c_str();
+    if (!jobsClient->SubscribeToNextJobExecutionChangedEvents(
+            nextJobRequest,
+            AWS_MQTT_QOS_AT_LEAST_ONCE,
+            std::bind(&JobsFeature::nextJobChangedHandler, this, std::placeholders::_1, std::placeholders::_2),
+            [this, recoveryGeneration](int ioError) {
+                completeRecoverySubscription(
+                    recoveryGeneration, NEXT_JOB_CHANGED_SUBSCRIPTION, "NextJobExecutionChanged events", ioError);
+            }))
+    {
+        completeRecoverySubscription(
+            recoveryGeneration, NEXT_JOB_CHANGED_SUBSCRIPTION, "NextJobExecutionChanged events", -1);
+    }
+
+    UpdateJobExecutionSubscriptionRequest updateRequest;
+    updateRequest.ThingName = thingName.c_str();
+    updateRequest.JobId = "+";
+    if (!jobsClient->SubscribeToUpdateJobExecutionAccepted(
+            updateRequest,
+            AWS_MQTT_QOS_AT_LEAST_ONCE,
+            std::bind(
+                &JobsFeature::updateJobExecutionStatusAcceptedHandler,
+                this,
+                std::placeholders::_1,
+                std::placeholders::_2),
+            [this, recoveryGeneration](int ioError) {
+                completeRecoverySubscription(
+                    recoveryGeneration, UPDATE_JOB_ACCEPTED_SUBSCRIPTION, "UpdateJobExecution accepted", ioError);
+            }))
+    {
+        completeRecoverySubscription(
+            recoveryGeneration, UPDATE_JOB_ACCEPTED_SUBSCRIPTION, "UpdateJobExecution accepted", -1);
+    }
+
+    if (!jobsClient->SubscribeToUpdateJobExecutionRejected(
+            updateRequest,
+            AWS_MQTT_QOS_AT_LEAST_ONCE,
+            std::bind(
+                &JobsFeature::updateJobExecutionStatusRejectedHandler,
+                this,
+                std::placeholders::_1,
+                std::placeholders::_2),
+            [this, recoveryGeneration](int ioError) {
+                completeRecoverySubscription(
+                    recoveryGeneration, UPDATE_JOB_REJECTED_SUBSCRIPTION, "UpdateJobExecution rejected", ioError);
+            }))
+    {
+        completeRecoverySubscription(
+            recoveryGeneration, UPDATE_JOB_REJECTED_SUBSCRIPTION, "UpdateJobExecution rejected", -1);
+    }
+}
+
+void JobsFeature::completeRecoverySubscription(
+    std::uint64_t recoveryGeneration,
+    std::uint8_t subscriptionMask,
+    const char *subscriptionName,
+    int ioError)
+{
+    string errorMessage;
+    {
+        std::lock_guard<std::mutex> lock(connectionRecoveryLock);
+        if (needStop.load() || !jobsClientReady || recoveryGeneration != connectionRecoveryGeneration ||
+            pendingRecoverySubscriptions == 0)
+        {
+            return;
+        }
+
+        if (completedRecoverySubscriptions & subscriptionMask)
+        {
+            return;
+        }
+        completedRecoverySubscriptions |= subscriptionMask;
+
+        LOGM_DEBUG(
+            TAG,
+            "Recovery acknowledgement received for %s subscription with code {%d}",
+            subscriptionName,
+            ioError);
+
+        if (ioError)
+        {
+            connectionRecoveryFailed = true;
+            errorMessage = FormatMessage(
+                "Encountered ioError {%d} while restoring the %s subscription", ioError, subscriptionName);
+        }
+
+        --pendingRecoverySubscriptions;
+        if (pendingRecoverySubscriptions == 0)
+        {
+            if (!connectionRecoveryFailed)
+            {
+                subscriptionsNeedRecovery = false;
+                LOG_INFO(TAG, "AWS IoT Jobs subscriptions restored; checking for pending jobs");
+                publishStartNextPendingJobExecutionRequest();
+            }
+            else
+            {
+                LOG_ERROR(TAG, "AWS IoT Jobs subscription recovery did not complete successfully");
+            }
+        }
+    }
+
+    if (!errorMessage.empty())
+    {
+        LOG_ERROR(TAG, errorMessage.c_str());
+        baseNotifier->onError(this, ClientBaseErrorNotification::SUBSCRIPTION_FAILED, errorMessage);
+    }
 }
 
 /**
@@ -237,15 +438,23 @@ void JobsFeature::startNextPendingJobReceivedHandler(StartNextJobExecutionRespon
             baseNotifier->onError(this, ClientBaseErrorNotification::MESSAGE_RECEIVED_AFTER_SHUTDOWN, jobMessage.str());
             return;
         }
-        else
+        bool jobsSubscriptionsReady;
         {
-            if (!isDuplicateNotification(response->Execution.value()))
-            {
-                handlingJob.store(true);
+            std::lock_guard<std::mutex> lock(connectionRecoveryLock);
+            jobsSubscriptionsReady = jobsClientReady && !subscriptionsNeedRecovery;
+        }
+        if (!jobsSubscriptionsReady)
+        {
+            LOG_WARN(TAG, "Ignoring StartNextPendingJob response until all AWS IoT Jobs subscriptions are ready");
+            return;
+        }
 
-                copyJobsNotification(response->Execution.value());
-                initJob(response->Execution.value());
-            }
+        if (!isDuplicateNotification(response->Execution.value()))
+        {
+            handlingJob.store(true);
+
+            copyJobsNotification(response->Execution.value());
+            initJob(response->Execution.value());
         }
     }
     else
@@ -287,16 +496,24 @@ void JobsFeature::nextJobChangedHandler(NextJobExecutionChangedEvent *event, int
             baseNotifier->onError(this, ClientBaseErrorNotification::MESSAGE_RECEIVED_AFTER_SHUTDOWN, jobMessage.str());
             return;
         }
-        else
+        bool jobsSubscriptionsReady;
         {
-            // Check to see if this is a duplicate notification
-            if (!isDuplicateNotification(event->Execution.value()))
-            {
-                handlingJob.store(true);
+            std::lock_guard<std::mutex> lock(connectionRecoveryLock);
+            jobsSubscriptionsReady = jobsClientReady && !subscriptionsNeedRecovery;
+        }
+        if (!jobsSubscriptionsReady)
+        {
+            LOG_WARN(TAG, "Ignoring NextJobExecutionChanged event until all AWS IoT Jobs subscriptions are ready");
+            return;
+        }
 
-                copyJobsNotification(event->Execution.value());
-                initJob(event->Execution.value());
-            }
+        // Check to see if this is a duplicate notification
+        if (!isDuplicateNotification(event->Execution.value()))
+        {
+            handlingJob.store(true);
+
+            copyJobsNotification(event->Execution.value());
+            initJob(event->Execution.value());
         }
     }
     else
@@ -657,7 +874,33 @@ void JobsFeature::runJobs()
     subscribeToUpdateJobExecutionStatusAccepted("+");
     subscribeToUpdateJobExecutionStatusRejected("+");
 
-    publishStartNextPendingJobExecutionRequest();
+    bool recoverSubscriptions = false;
+    std::uint64_t recoveryGeneration = 0;
+    {
+        std::lock_guard<std::mutex> lock(connectionRecoveryLock);
+        if (!needStop.load())
+        {
+            jobsClientReady = true;
+            if (subscriptionsNeedRecovery)
+            {
+                recoveryGeneration = ++connectionRecoveryGeneration;
+                pendingRecoverySubscriptions = JOBS_SUBSCRIPTION_COUNT;
+                connectionRecoveryFailed = false;
+                completedRecoverySubscriptions = 0;
+                recoverSubscriptions = true;
+            }
+            else
+            {
+                publishStartNextPendingJobExecutionRequest();
+            }
+        }
+    }
+
+    if (recoverSubscriptions)
+    {
+        LOG_INFO(TAG, "Recreating AWS IoT Jobs subscriptions after MQTT session loss during startup");
+        resubscribeAfterSessionLoss(recoveryGeneration);
+    }
 }
 
 int JobsFeature::init(
@@ -696,7 +939,16 @@ int JobsFeature::start()
 
 int JobsFeature::stop()
 {
-    needStop.store(true);
+    {
+        std::lock_guard<std::mutex> lock(connectionRecoveryLock);
+        needStop.store(true);
+        jobsClientReady = false;
+        ++connectionRecoveryGeneration;
+        pendingRecoverySubscriptions = 0;
+        connectionRecoveryFailed = false;
+        completedRecoverySubscriptions = 0;
+        subscriptionsNeedRecovery = false;
+    }
     if (!handlingJob.load())
     {
         baseNotifier->onEvent(static_cast<Feature *>(this), ClientBaseEventNotification::FEATURE_STOPPED);

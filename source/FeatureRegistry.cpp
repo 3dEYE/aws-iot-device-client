@@ -4,6 +4,9 @@
 #include "FeatureRegistry.h"
 #include "logging/LoggerFactory.h"
 
+#include <exception>
+#include <vector>
+
 using namespace std;
 using namespace Aws::Iot::DeviceClient;
 using namespace Aws::Iot::DeviceClient::Util;
@@ -80,6 +83,43 @@ void FeatureRegistry::startAll() const
         {
             LOGM_DEBUG(TAG, "Attempting to start %s", feature.first.c_str());
             feature.second->start();
+        }
+    }
+}
+
+void FeatureRegistry::onConnectionResumed(bool sessionPresent) const
+{
+    std::vector<std::shared_ptr<Feature>> activeFeatures;
+    {
+        std::lock_guard<std::mutex> lock(featuresLock);
+        activeFeatures.reserve(features.size());
+        for (const auto &feature : features)
+        {
+            if (feature.second != nullptr)
+            {
+                activeFeatures.push_back(feature.second);
+            }
+        }
+    }
+
+    for (const auto &feature : activeFeatures)
+    {
+        try
+        {
+            feature->onConnectionResumed(sessionPresent);
+        }
+        catch (const std::exception &exception)
+        {
+            LOGM_ERROR(
+                TAG,
+                "Feature %s failed while handling resumed MQTT connection: %s",
+                feature->getName().c_str(),
+                exception.what());
+        }
+        catch (...)
+        {
+            LOGM_ERROR(
+                TAG, "Feature %s failed while handling resumed MQTT connection", feature->getName().c_str());
         }
     }
 }

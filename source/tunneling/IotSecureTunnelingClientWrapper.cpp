@@ -32,13 +32,13 @@ namespace Aws
                  * @param handler Response handler callback
                  * @param onSubAck SubAck handler
                  */
-                void IotSecureTunnelingClientWrapper::SubscribeToTunnelsNotify(
+                bool IotSecureTunnelingClientWrapper::SubscribeToTunnelsNotify(
                     const Aws::Iotsecuretunneling::SubscribeToTunnelsNotifyRequest &request,
                     Aws::Crt::Mqtt::QOS qos,
                     const Iotsecuretunneling::OnSubscribeToTunnelsNotifyResponse &handler,
                     const Iotsecuretunneling::OnSubscribeComplete &onSubAck)
                 {
-                    iotSecureTunnelingClient->SubscribeToTunnelsNotify(
+                    return iotSecureTunnelingClient->SubscribeToTunnelsNotify(
                         request, AWS_MQTT_QOS_AT_LEAST_ONCE, handler, onSubAck);
                 }
             } // namespace SecureTunneling

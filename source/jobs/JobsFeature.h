@@ -16,6 +16,10 @@
 #include "JobDocument.h"
 #include "JobEngine.h"
 
+#include <atomic>
+#include <cstdint>
+#include <memory>
+
 namespace Aws
 {
     namespace Iot
@@ -75,6 +79,7 @@ namespace Aws
                     // Interface methods defined in Feature.h
                     virtual int start() override;
                     virtual int stop() override;
+                    virtual void onConnectionResumed(bool sessionPresent) override;
 
                   protected:
                     /**
@@ -117,6 +122,13 @@ namespace Aws
                      * \brief Whether the jobs feature is currently executing a job
                      */
                     std::atomic<bool> handlingJob{false};
+                    std::mutex connectionRecoveryLock;
+                    bool jobsClientReady{false};
+                    std::uint64_t connectionRecoveryGeneration{0};
+                    size_t pendingRecoverySubscriptions{0};
+                    bool connectionRecoveryFailed{false};
+                    std::uint8_t completedRecoverySubscriptions{0};
+                    bool subscriptionsNeedRecovery{false};
 
                     /**
                      * \brief A lock used to control access to the map of EphemeralPromise
@@ -184,13 +196,6 @@ namespace Aws
                      */
                     void ackSubscribeToStartNextJobRejected(int ioError);
                     /**
-                     * \brief Acknowledgement that IoT Core has received our StartNextPendingJob message
-                     *
-                     * @param ioError a non-zero code here indicates a problem. Turn on logging in IoT Core
-                     * and check CloudWatch for more insights on errors
-                     */
-                    void ackStartNextPendingJobPub(int ioError) const;
-                    /**
                      * \brief Acknowledgement that IoT Core has received our UpdateJobExecutionStatus message
                      *
                      * @param ioError a non-zero code here indicates a problem. Turn on logging in IoT Core
@@ -207,6 +212,20 @@ namespace Aws
                      * \brief Publishes a request to startNextPendingJobExecution
                      */
                     virtual void publishStartNextPendingJobExecutionRequest();
+
+                    /**
+                     * \brief Recreates all Jobs subscriptions after the broker loses the MQTT session
+                     */
+                    void resubscribeAfterSessionLoss(std::uint64_t recoveryGeneration);
+
+                    /**
+                     * \brief Tracks completion of one subscription created during session recovery
+                     */
+                    void completeRecoverySubscription(
+                        std::uint64_t recoveryGeneration,
+                        std::uint8_t subscriptionMask,
+                        const char *subscriptionName,
+                        int ioError);
 
                     /**
                      * \brief Attempts to update a job execution to the provided status

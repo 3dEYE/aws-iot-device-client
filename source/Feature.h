@@ -46,6 +46,15 @@ namespace Aws
                 virtual int stop() = 0;
 
                 /**
+                 * \brief Called after the shared MQTT connection is resumed
+                 *
+                 * @param sessionPresent true when the broker preserved the previous MQTT session
+                 *
+                 * Implementations must not block because this callback runs on the MQTT event-loop thread.
+                 */
+                virtual void onConnectionResumed(bool) {}
+
+                /**
                  * \brief For a given feature, returns its name
                  *
                  * @return a string value representing the feature's name

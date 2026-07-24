@@ -48,6 +48,20 @@ class SharedCrtResourceManagerWrapper : public SharedCrtResourceManager
 {
   public:
     bool locateCredentialsWrapper(const PlainConfig &config) { return locateCredentials(config); }
+    void handleConnectionResumedWrapper(int returnCode, bool sessionPresent)
+    {
+        handleConnectionResumed(returnCode, sessionPresent);
+    }
+
+    int connectionResumedNotifications{0};
+    bool lastSessionPresent{false};
+
+  protected:
+    void notifyFeaturesConnectionResumed(bool sessionPresent) override
+    {
+        ++connectionResumedNotifications;
+        lastSessionPresent = sessionPresent;
+    }
 };
 
 class SharedResourceManagerTest : public ::testing::Test
@@ -153,4 +167,20 @@ TEST_F(SharedResourceManagerTest, badPermissionsDirectory)
     chmod(certDir.c_str(), 0777);
 
     ASSERT_FALSE(manager.locateCredentialsWrapper(config));
+}
+
+TEST_F(SharedResourceManagerTest, connectionResumeWithSessionForwardsSessionState)
+{
+    manager.handleConnectionResumedWrapper(0, true);
+
+    ASSERT_EQ(1, manager.connectionResumedNotifications);
+    ASSERT_TRUE(manager.lastSessionPresent);
+}
+
+TEST_F(SharedResourceManagerTest, connectionResumeWithoutSessionForwardsSessionState)
+{
+    manager.handleConnectionResumedWrapper(0, false);
+
+    ASSERT_EQ(1, manager.connectionResumedNotifications);
+    ASSERT_FALSE(manager.lastSessionPresent);
 }

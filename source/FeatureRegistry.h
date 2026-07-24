@@ -70,6 +70,13 @@ namespace Aws
                      */
                     void startAll() const;
 
+                    /**
+                     * @brief Notifies all active features that the shared MQTT connection has resumed
+                     *
+                     * @param sessionPresent true when the broker preserved the previous MQTT session
+                     */
+                    void onConnectionResumed(bool sessionPresent) const;
+
                   private:
                     static constexpr char TAG[] = "FeatureRegistry.cpp";
                     std::map<std::string, std::shared_ptr<Feature>> features;

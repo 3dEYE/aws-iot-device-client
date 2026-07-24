@@ -89,7 +89,7 @@ class MockIotSecureTunnelingClient : public AbstractIotSecureTunnelingClient
   public:
     MockIotSecureTunnelingClient() = default;
     MOCK_METHOD(
-        void,
+        bool,
         SubscribeToTunnelsNotify,
         (const Iotsecuretunneling::SubscribeToTunnelsNotifyRequest &request,
          Aws::Crt::Mqtt::QOS qos,
@@ -146,6 +146,129 @@ TEST_F(TestSecureTunnelingFeature, Init)
     ASSERT_EQ(0, secureTunnelingFeature->init(manager, notifier, config));
 }
 
+TEST_F(TestSecureTunnelingFeature, CleanSessionRestoresTunnelNotificationSubscription)
+{
+    EXPECT_CALL(*secureTunnelingFeature, createClient()).Times(1).WillOnce(Return(mockClient));
+    EXPECT_CALL(*mockClient, SubscribeToTunnelsNotify(ThingNameEq(thingName), AWS_MQTT_QOS_AT_LEAST_ONCE, _, _))
+        .Times(3)
+        .WillRepeatedly(DoAll(InvokeArgument<3>(0), Return(true)));
+    EXPECT_CALL(*notifier, onEvent(secureTunnelingFeature.get(), ClientBaseEventNotification::FEATURE_STARTED))
+        .Times(1);
+
+    secureTunnelingFeature->init(manager, notifier, config);
+    secureTunnelingFeature->start();
+    secureTunnelingFeature->onConnectionResumed(false);
+    secureTunnelingFeature->onConnectionResumed(false);
+}
+
+TEST_F(TestSecureTunnelingFeature, PresentSessionDoesNotResubscribeTunnelNotifications)
+{
+    EXPECT_CALL(*secureTunnelingFeature, createClient()).Times(1).WillOnce(Return(mockClient));
+    EXPECT_CALL(*mockClient, SubscribeToTunnelsNotify(ThingNameEq(thingName), AWS_MQTT_QOS_AT_LEAST_ONCE, _, _))
+        .Times(1)
+        .WillOnce(DoAll(InvokeArgument<3>(0), Return(true)));
+    EXPECT_CALL(*notifier, onEvent(secureTunnelingFeature.get(), ClientBaseEventNotification::FEATURE_STARTED))
+        .Times(1);
+
+    secureTunnelingFeature->init(manager, notifier, config);
+    secureTunnelingFeature->start();
+    secureTunnelingFeature->onConnectionResumed(true);
+}
+
+TEST_F(TestSecureTunnelingFeature, CleanSessionHandlesImmediateSubscriptionQueueFailure)
+{
+    EXPECT_CALL(*secureTunnelingFeature, createContext(_, _, _)).Times(0);
+    EXPECT_CALL(*secureTunnelingFeature, createClient()).Times(1).WillOnce(Return(mockClient));
+    EXPECT_CALL(*mockClient, SubscribeToTunnelsNotify(ThingNameEq(thingName), AWS_MQTT_QOS_AT_LEAST_ONCE, _, _))
+        .WillOnce(DoAll(InvokeArgument<3>(0), Return(true)))
+        .WillOnce(Return(false));
+    EXPECT_CALL(*notifier, onEvent(secureTunnelingFeature.get(), ClientBaseEventNotification::FEATURE_STARTED))
+        .Times(1);
+
+    secureTunnelingFeature->init(manager, notifier, config);
+    secureTunnelingFeature->start();
+    secureTunnelingFeature->onConnectionResumed(false);
+}
+
+TEST_F(TestSecureTunnelingFeature, ExistingSessionResumeRestartsInterruptedSubscriptionRecovery)
+{
+    Iotsecuretunneling::OnSubscribeComplete firstRecovery;
+    Iotsecuretunneling::OnSubscribeComplete secondRecovery;
+    Iotsecuretunneling::OnSubscribeComplete thirdRecovery;
+
+    EXPECT_CALL(*secureTunnelingFeature, createContext(_, _, _)).Times(0);
+    EXPECT_CALL(*secureTunnelingFeature, createClient()).Times(1).WillOnce(Return(mockClient));
+    EXPECT_CALL(*mockClient, SubscribeToTunnelsNotify(ThingNameEq(thingName), AWS_MQTT_QOS_AT_LEAST_ONCE, _, _))
+        .Times(4)
+        .WillOnce(DoAll(InvokeArgument<3>(0), Return(true)))
+        .WillOnce(DoAll(SaveArg<3>(&firstRecovery), Return(true)))
+        .WillOnce(DoAll(SaveArg<3>(&secondRecovery), Return(true)))
+        .WillOnce(DoAll(SaveArg<3>(&thirdRecovery), Return(true)));
+    EXPECT_CALL(*notifier, onEvent(secureTunnelingFeature.get(), ClientBaseEventNotification::FEATURE_STARTED))
+        .Times(1);
+
+    secureTunnelingFeature->init(manager, notifier, config);
+    secureTunnelingFeature->start();
+    secureTunnelingFeature->onConnectionResumed(false);
+    secureTunnelingFeature->onConnectionResumed(true);
+
+    firstRecovery(0);
+    secureTunnelingFeature->onConnectionResumed(true);
+
+    secondRecovery(0);
+    thirdRecovery(0);
+    secureTunnelingFeature->onConnectionResumed(true);
+}
+
+TEST_F(TestSecureTunnelingFeature, CleanSessionDoesNotSubscribeBeforeFeatureStarts)
+{
+    EXPECT_CALL(*secureTunnelingFeature, createClient()).Times(0);
+    EXPECT_CALL(*mockClient, SubscribeToTunnelsNotify(_, _, _, _)).Times(0);
+
+    secureTunnelingFeature->init(manager, notifier, config);
+    secureTunnelingFeature->onConnectionResumed(false);
+}
+
+TEST_F(TestSecureTunnelingFeature, CleanSessionDoesNotResubscribeAfterFeatureStops)
+{
+    EXPECT_CALL(*secureTunnelingFeature, createClient()).Times(1).WillOnce(Return(mockClient));
+    EXPECT_CALL(*mockClient, SubscribeToTunnelsNotify(ThingNameEq(thingName), AWS_MQTT_QOS_AT_LEAST_ONCE, _, _))
+        .Times(1)
+        .WillOnce(DoAll(InvokeArgument<3>(0), Return(true)));
+    EXPECT_CALL(*notifier, onEvent(secureTunnelingFeature.get(), ClientBaseEventNotification::FEATURE_STARTED))
+        .Times(1);
+    EXPECT_CALL(*notifier, onEvent(secureTunnelingFeature.get(), ClientBaseEventNotification::FEATURE_STOPPED))
+        .Times(1);
+
+    secureTunnelingFeature->init(manager, notifier, config);
+    secureTunnelingFeature->start();
+    secureTunnelingFeature->stop();
+    secureTunnelingFeature->onConnectionResumed(false);
+}
+
+TEST_F(TestSecureTunnelingFeature, CleanSessionDoesNotSubscribeWhenTunnelNotificationsAreDisabled)
+{
+    config.tunneling.subscribeNotification = false;
+    config.tunneling.destinationAccessToken = "access-token";
+    config.tunneling.region = "us-west-2";
+    config.tunneling.port = 22;
+
+    EXPECT_CALL(*secureTunnelingFeature, createContext(StrEq("access-token"), StrEq("us-west-2"), Eq(22)))
+        .Times(1)
+        .WillOnce(Return(ByMove(std::move(fakeContext))));
+    EXPECT_CALL(*secureTunnelingFeature, createClient()).Times(0);
+    EXPECT_CALL(*mockClient, SubscribeToTunnelsNotify(_, _, _, _)).Times(0);
+    EXPECT_CALL(*notifier, onEvent(secureTunnelingFeature.get(), ClientBaseEventNotification::FEATURE_STARTED))
+        .Times(1);
+    EXPECT_CALL(*notifier, onEvent(secureTunnelingFeature.get(), ClientBaseEventNotification::FEATURE_STOPPED))
+        .Times(1);
+
+    secureTunnelingFeature->init(manager, notifier, config);
+    secureTunnelingFeature->start();
+    secureTunnelingFeature->onConnectionResumed(false);
+    secureTunnelingFeature->stop();
+}
+
 TEST_F(TestSecureTunnelingFeature, CreateSSHContextHappy)
 {
     /**
@@ -168,7 +291,7 @@ TEST_F(TestSecureTunnelingFeature, CreateSSHContextHappy)
     EXPECT_CALL(*secureTunnelingFeature, createClient()).Times(1).WillOnce(Return(mockClient));
     EXPECT_CALL(*mockClient, SubscribeToTunnelsNotify(ThingNameEq(thingName), AWS_MQTT_QOS_AT_LEAST_ONCE, _, _))
         .Times(1)
-        .WillOnce(DoAll(InvokeArgument<2>(response.get(), 0), InvokeArgument<3>(0)));
+        .WillOnce(DoAll(InvokeArgument<2>(response.get(), 0), InvokeArgument<3>(0), Return(true)));
     EXPECT_CALL(*notifier, onEvent(_, _)).Times(2);
     secureTunnelingFeature->init(manager, notifier, config);
     secureTunnelingFeature->start();
@@ -197,7 +320,7 @@ TEST_F(TestSecureTunnelingFeature, CreateVNCContextHappy)
     EXPECT_CALL(*secureTunnelingFeature, createClient()).Times(1).WillOnce(Return(mockClient));
     EXPECT_CALL(*mockClient, SubscribeToTunnelsNotify(ThingNameEq(thingName), AWS_MQTT_QOS_AT_LEAST_ONCE, _, _))
         .Times(1)
-        .WillOnce(DoAll(InvokeArgument<2>(response.get(), 0), InvokeArgument<3>(0)));
+        .WillOnce(DoAll(InvokeArgument<2>(response.get(), 0), InvokeArgument<3>(0), Return(true)));
     EXPECT_CALL(*notifier, onEvent(_, _)).Times(2);
     secureTunnelingFeature->init(manager, notifier, config);
     secureTunnelingFeature->start();
@@ -214,7 +337,7 @@ TEST_F(TestSecureTunnelingFeature, ResponseNULL)
     EXPECT_CALL(*secureTunnelingFeature, createClient()).Times(1).WillOnce(Return(mockClient));
     EXPECT_CALL(*mockClient, SubscribeToTunnelsNotify(ThingNameEq(thingName), AWS_MQTT_QOS_AT_LEAST_ONCE, _, _))
         .Times(1)
-        .WillOnce(DoAll(InvokeArgument<2>(nullptr, 1), InvokeArgument<3>(0)));
+        .WillOnce(DoAll(InvokeArgument<2>(nullptr, 1), InvokeArgument<3>(0), Return(true)));
     EXPECT_CALL(*notifier, onEvent(_, _)).Times(2);
     secureTunnelingFeature->init(manager, notifier, config);
     secureTunnelingFeature->start();
@@ -242,7 +365,7 @@ TEST_F(TestSecureTunnelingFeature, ResponseIoError)
     EXPECT_CALL(*secureTunnelingFeature, createClient()).Times(1).WillOnce(Return(mockClient));
     EXPECT_CALL(*mockClient, SubscribeToTunnelsNotify(ThingNameEq(thingName), AWS_MQTT_QOS_AT_LEAST_ONCE, _, _))
         .Times(1)
-        .WillOnce(DoAll(InvokeArgument<2>(response.get(), 1), InvokeArgument<3>(0)));
+        .WillOnce(DoAll(InvokeArgument<2>(response.get(), 1), InvokeArgument<3>(0), Return(true)));
     EXPECT_CALL(*notifier, onEvent(_, _)).Times(2);
     secureTunnelingFeature->init(manager, notifier, config);
     secureTunnelingFeature->start();
@@ -273,7 +396,11 @@ TEST_F(TestSecureTunnelingFeature, DuplicateResponse)
     EXPECT_CALL(*mockClient, SubscribeToTunnelsNotify(ThingNameEq(thingName), AWS_MQTT_QOS_AT_LEAST_ONCE, _, _))
         .Times(1)
         .WillOnce(
-            DoAll(InvokeArgument<2>(response.get(), 0), InvokeArgument<2>(response.get(), 0), InvokeArgument<3>(0)));
+            DoAll(
+                InvokeArgument<2>(response.get(), 0),
+                InvokeArgument<2>(response.get(), 0),
+                InvokeArgument<3>(0),
+                Return(true)));
     EXPECT_CALL(*notifier, onEvent(_, _)).Times(2);
     secureTunnelingFeature->init(manager, notifier, config);
     secureTunnelingFeature->start();
@@ -302,7 +429,7 @@ TEST_F(TestSecureTunnelingFeature, MultipleServices)
     EXPECT_CALL(*secureTunnelingFeature, createClient()).Times(1).WillOnce(Return(mockClient));
     EXPECT_CALL(*mockClient, SubscribeToTunnelsNotify(ThingNameEq(thingName), AWS_MQTT_QOS_AT_LEAST_ONCE, _, _))
         .Times(1)
-        .WillOnce(DoAll(InvokeArgument<2>(response.get(), 1), InvokeArgument<3>(0)));
+        .WillOnce(DoAll(InvokeArgument<2>(response.get(), 1), InvokeArgument<3>(0), Return(true)));
     EXPECT_CALL(*notifier, onEvent(_, _)).Times(2);
     secureTunnelingFeature->init(manager, notifier, config);
     secureTunnelingFeature->start();
@@ -330,7 +457,7 @@ TEST_F(TestSecureTunnelingFeature, UnsupportedService)
     EXPECT_CALL(*secureTunnelingFeature, createClient()).Times(1).WillOnce(Return(mockClient));
     EXPECT_CALL(*mockClient, SubscribeToTunnelsNotify(ThingNameEq(thingName), AWS_MQTT_QOS_AT_LEAST_ONCE, _, _))
         .Times(1)
-        .WillOnce(DoAll(InvokeArgument<2>(response.get(), 1), InvokeArgument<3>(0)));
+        .WillOnce(DoAll(InvokeArgument<2>(response.get(), 1), InvokeArgument<3>(0), Return(true)));
     EXPECT_CALL(*notifier, onEvent(_, _)).Times(2);
     secureTunnelingFeature->init(manager, notifier, config);
     secureTunnelingFeature->start();
@@ -357,7 +484,7 @@ TEST_F(TestSecureTunnelingFeature, NoServices)
     EXPECT_CALL(*secureTunnelingFeature, createClient()).Times(1).WillOnce(Return(mockClient));
     EXPECT_CALL(*mockClient, SubscribeToTunnelsNotify(ThingNameEq(thingName), AWS_MQTT_QOS_AT_LEAST_ONCE, _, _))
         .Times(1)
-        .WillOnce(DoAll(InvokeArgument<2>(response.get(), 1), InvokeArgument<3>(0)));
+        .WillOnce(DoAll(InvokeArgument<2>(response.get(), 1), InvokeArgument<3>(0), Return(true)));
     EXPECT_CALL(*notifier, onEvent(_, _)).Times(2);
     secureTunnelingFeature->init(manager, notifier, config);
     secureTunnelingFeature->start();
@@ -385,7 +512,7 @@ TEST_F(TestSecureTunnelingFeature, SourceMode)
     EXPECT_CALL(*secureTunnelingFeature, createClient()).Times(1).WillOnce(Return(mockClient));
     EXPECT_CALL(*mockClient, SubscribeToTunnelsNotify(ThingNameEq(thingName), AWS_MQTT_QOS_AT_LEAST_ONCE, _, _))
         .Times(1)
-        .WillOnce(DoAll(InvokeArgument<2>(response.get(), 1), InvokeArgument<3>(0)));
+        .WillOnce(DoAll(InvokeArgument<2>(response.get(), 1), InvokeArgument<3>(0), Return(true)));
     EXPECT_CALL(*notifier, onEvent(_, _)).Times(2);
     secureTunnelingFeature->init(manager, notifier, config);
     secureTunnelingFeature->start();

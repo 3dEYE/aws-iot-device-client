@@ -12,6 +12,8 @@
 #include "aws/crt/http/HttpProxyStrategy.h"
 #include <aws/iotdevicecommon/IotDevice.h>
 #include <aws/iotsecuretunneling/SecureTunnelingNotifyResponse.h>
+#include <cstdint>
+#include <mutex>
 
 namespace Aws
 {
@@ -57,6 +59,7 @@ namespace Aws
                     std::string getName() override;
                     int start() override;
                     int stop() override;
+                    void onConnectionResumed(bool sessionPresent) override;
 
                     /**
                      * \brief Returns the port number of the given service
@@ -87,6 +90,14 @@ namespace Aws
                      */
                     void RunSecureTunneling();
 
+                    /**
+                     * \brief Subscribe to MQTT new tunnel notifications
+                     *
+                     * @param isRecovery true when restoring the subscription after a clean MQTT session
+                     * @param recoveryGeneration identifies the current recovery attempt
+                     */
+                    bool SubscribeToTunnelNotifications(bool isRecovery, std::uint64_t recoveryGeneration);
+
                     //
                     // MQTT Tunnel Notification
                     //
@@ -106,7 +117,10 @@ namespace Aws
                      *
                      * @param ioErr error code
                      */
-                    void OnSubscribeComplete(int ioErr) const;
+                    void OnSubscribeComplete(
+                        int ioErr,
+                        bool isRecovery,
+                        std::uint64_t recoveryGeneration);
 
                     /**
                      * \brief Get the secure tunneling data plain endpoint given an AWS region
@@ -197,6 +211,26 @@ namespace Aws
                      * \brief Should the Secure Tunneling feature subscribe to MQTT new tunnel notification?
                      */
                     bool mSubscribeNotification{true};
+
+                    /**
+                     * \brief Protects MQTT subscription recovery lifecycle state
+                     */
+                    std::mutex mConnectionRecoveryLock;
+
+                    /**
+                     * \brief True while the feature is running and can restore its MQTT subscription
+                     */
+                    bool mStarted{false};
+
+                    /**
+                     * \brief Identifies the current subscription recovery attempt so stale callbacks can be ignored
+                     */
+                    std::uint64_t mConnectionRecoveryGeneration{0};
+
+                    /**
+                     * \brief Remains true until the current subscription recovery receives a successful SUBACK
+                     */
+                    bool mSubscriptionNeedsRecovery{false};
 
                     /**
                      * \brief Endpoint override. Normally the endpoint is determined by `region` only. This is only used

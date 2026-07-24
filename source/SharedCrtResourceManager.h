@@ -57,6 +57,13 @@ namespace Aws
                  */
                 bool locateCredentials(const PlainConfig &config) const;
 
+                void handleConnectionResumed(int returnCode, bool sessionPresent);
+
+                /**
+                 * inheritable for testing
+                 */
+                virtual void notifyFeaturesConnectionResumed(bool sessionPresent);
+
               public:
                 SharedCrtResourceManager() {}
 
