@@ -71,6 +71,11 @@ class MockSecureTunnelingContext : public SecureTunnelingContext
         task();
     }
 
+    void InvokeTcpForwardTerminated(TcpForward *tcpForward, int errorCode)
+    {
+        OnTcpForwardTerminated(tcpForward, errorCode);
+    }
+
     bool deferLifecycleTasks{false};
     vector<std::function<void()>> scheduledLifecycleTasks;
 };
@@ -82,6 +87,7 @@ class MockSecureTunnel : public SecureTunnelWrapper
     MOCK_METHOD(int, Connect, (), (override));
     MOCK_METHOD(int, Close, (), (override));
     MOCK_METHOD(int, SendData, (const Aws::Crt::ByteCursor &data), (override));
+    MOCK_METHOD(int, SendStreamReset, (), (override));
     bool IsValid() override { return true; }
 };
 
@@ -191,16 +197,80 @@ TEST_F(TestSecureTunnelContext, OnStreamStartHappy)
 
 TEST_F(TestSecureTunnelContext, TcpForwardConnectFailureStopsForward)
 {
+    Aws::Iotsecuretunneling::OnStreamStart streamStart;
     context = make_shared<MockSecureTunnelingContext>(manager, rootCa, accessToken, endpoint, port, nullptr);
 
     EXPECT_CALL(*context, CreateSecureTunnel(_, _, _, _, _, _, _, _))
-        .WillOnce(DoAll(SaveArg<7>(&onStopped), InvokeArgument<4>(), Return(tunnel)));
+        .WillOnce(DoAll(SaveArg<4>(&streamStart), SaveArg<7>(&onStopped), Return(tunnel)));
     EXPECT_CALL(*context, CreateTcpForward()).WillOnce(Return(tcpForward));
     EXPECT_CALL(*tcpForward, Connect()).WillOnce(Return(AWS_OP_ERR));
     EXPECT_CALL(*tcpForward, Stop()).Times(1);
     EXPECT_CALL(*tunnel, Connect()).WillOnce(Return(AWS_OP_SUCCESS));
+    EXPECT_CALL(*tunnel, SendStreamReset()).WillOnce(Return(AWS_OP_SUCCESS));
 
     ASSERT_TRUE(context->ConnectToSecureTunnel());
+    ASSERT_TRUE(static_cast<bool>(streamStart));
+    streamStart();
+}
+
+TEST_F(TestSecureTunnelContext, TcpForwardTerminationResetsStream)
+{
+    Aws::Iotsecuretunneling::OnStreamStart streamStart;
+    context = make_shared<MockSecureTunnelingContext>(manager, rootCa, accessToken, endpoint, port, nullptr);
+
+    EXPECT_CALL(*context, CreateSecureTunnel(_, _, _, _, _, _, _, _))
+        .WillOnce(DoAll(SaveArg<4>(&streamStart), SaveArg<7>(&onStopped), Return(tunnel)));
+    EXPECT_CALL(*context, CreateTcpForward()).WillOnce(Return(tcpForward));
+    EXPECT_CALL(*tcpForward, Connect()).WillOnce(Return(AWS_OP_SUCCESS));
+    EXPECT_CALL(*tunnel, Connect()).WillOnce(Return(AWS_OP_SUCCESS));
+    EXPECT_CALL(*tunnel, SendStreamReset()).WillOnce(Return(AWS_OP_SUCCESS));
+
+    ASSERT_TRUE(context->ConnectToSecureTunnel());
+    ASSERT_TRUE(static_cast<bool>(streamStart));
+    streamStart();
+
+    context->InvokeTcpForwardTerminated(tcpForward.get(), AWS_IO_SOCKET_CLOSED);
+}
+
+TEST_F(TestSecureTunnelContext, TcpForwardResetFailureStopsTunnel)
+{
+    Aws::Iotsecuretunneling::OnStreamStart streamStart;
+    context = make_shared<MockSecureTunnelingContext>(manager, rootCa, accessToken, endpoint, port, nullptr);
+
+    EXPECT_CALL(*context, CreateSecureTunnel(_, _, _, _, _, _, _, _))
+        .WillOnce(DoAll(SaveArg<4>(&streamStart), SaveArg<7>(&onStopped), Return(tunnel)));
+    EXPECT_CALL(*context, CreateTcpForward()).WillOnce(Return(tcpForward));
+    EXPECT_CALL(*tcpForward, Connect()).WillOnce(Return(AWS_OP_SUCCESS));
+    EXPECT_CALL(*tunnel, Connect()).WillOnce(Return(AWS_OP_SUCCESS));
+    EXPECT_CALL(*tunnel, SendStreamReset()).WillOnce(Return(AWS_OP_ERR));
+    EXPECT_CALL(*tunnel, Close()).WillOnce(Return(AWS_OP_SUCCESS));
+
+    ASSERT_TRUE(context->ConnectToSecureTunnel());
+    ASSERT_TRUE(static_cast<bool>(streamStart));
+    streamStart();
+
+    context->InvokeTcpForwardTerminated(tcpForward.get(), AWS_IO_SOCKET_CLOSED);
+}
+
+TEST_F(TestSecureTunnelContext, StaleTcpForwardTerminationIsIgnored)
+{
+    Aws::Iotsecuretunneling::OnStreamStart streamStart;
+    auto staleTcpForward = make_shared<MockTcpForward>(manager, port);
+    context = make_shared<MockSecureTunnelingContext>(manager, rootCa, accessToken, endpoint, port, nullptr);
+
+    EXPECT_CALL(*context, CreateSecureTunnel(_, _, _, _, _, _, _, _))
+        .WillOnce(DoAll(SaveArg<4>(&streamStart), SaveArg<7>(&onStopped), Return(tunnel)));
+    EXPECT_CALL(*context, CreateTcpForward()).WillOnce(Return(tcpForward));
+    EXPECT_CALL(*tcpForward, Connect()).WillOnce(Return(AWS_OP_SUCCESS));
+    EXPECT_CALL(*tcpForward, Stop()).Times(1);
+    EXPECT_CALL(*tunnel, Connect()).WillOnce(Return(AWS_OP_SUCCESS));
+    EXPECT_CALL(*tunnel, SendStreamReset()).Times(0);
+
+    ASSERT_TRUE(context->ConnectToSecureTunnel());
+    ASSERT_TRUE(static_cast<bool>(streamStart));
+    streamStart();
+
+    context->InvokeTcpForwardTerminated(staleTcpForward.get(), AWS_IO_SOCKET_CLOSED);
 }
 
 TEST_F(TestSecureTunnelContext, OnStreamStartInvalidPortLow)
@@ -209,14 +279,18 @@ TEST_F(TestSecureTunnelContext, OnStreamStartInvalidPortLow)
      * Create a MockSecureTunnelContext with invalid (too low) port number and inject a mock SecureTunnel
      * Verify no create TcpForward
      */
+    Aws::Iotsecuretunneling::OnStreamStart streamStart;
     context = make_shared<MockSecureTunnelingContext>(manager, rootCa, accessToken, endpoint, 0, nullptr);
 
     EXPECT_CALL(*context, CreateSecureTunnel(_, _, _, _, _, _, _, _))
-        .WillOnce(DoAll(SaveArg<7>(&onStopped), InvokeArgument<4>(), Return(tunnel)));
+        .WillOnce(DoAll(SaveArg<4>(&streamStart), SaveArg<7>(&onStopped), Return(tunnel)));
     EXPECT_CALL(*context, CreateTcpForward()).Times(0);
     EXPECT_CALL(*tunnel, Connect()).WillOnce(Return(0));
+    EXPECT_CALL(*tunnel, SendStreamReset()).WillOnce(Return(AWS_OP_SUCCESS));
 
     ASSERT_TRUE(context->ConnectToSecureTunnel());
+    ASSERT_TRUE(static_cast<bool>(streamStart));
+    streamStart();
 }
 
 TEST_F(TestSecureTunnelContext, OnStreamStartInvalidPortHigh)
@@ -225,14 +299,18 @@ TEST_F(TestSecureTunnelContext, OnStreamStartInvalidPortHigh)
      * Create a MockSecureTunnelContext with invalid (too high) port number and inject a mock SecureTunnel
      * Verify no create TcpForward
      */
+    Aws::Iotsecuretunneling::OnStreamStart streamStart;
     context = make_shared<MockSecureTunnelingContext>(manager, rootCa, accessToken, endpoint, 65536, nullptr);
 
     EXPECT_CALL(*context, CreateSecureTunnel(_, _, _, _, _, _, _, _))
-        .WillOnce(DoAll(SaveArg<7>(&onStopped), InvokeArgument<4>(), Return(tunnel)));
+        .WillOnce(DoAll(SaveArg<4>(&streamStart), SaveArg<7>(&onStopped), Return(tunnel)));
     EXPECT_CALL(*context, CreateTcpForward()).Times(0);
     EXPECT_CALL(*tunnel, Connect()).WillOnce(Return(0));
+    EXPECT_CALL(*tunnel, SendStreamReset()).WillOnce(Return(AWS_OP_SUCCESS));
 
     ASSERT_TRUE(context->ConnectToSecureTunnel());
+    ASSERT_TRUE(static_cast<bool>(streamStart));
+    streamStart();
 }
 
 TEST_F(TestSecureTunnelContext, OnStreamReset)
@@ -247,6 +325,7 @@ TEST_F(TestSecureTunnelContext, OnStreamReset)
     EXPECT_CALL(*context, CreateSecureTunnel(_, _, _, _, _, _, _, _))
         .WillOnce(DoAll(SaveArg<7>(&onStopped), InvokeArgument<5>(), Return(tunnel)));
     EXPECT_CALL(*context, DisconnectFromTcpForward()).Times(1);
+    EXPECT_CALL(*tunnel, SendStreamReset()).Times(0);
     EXPECT_CALL(*tunnel, Connect()).WillOnce(Return(0));
 
     ASSERT_TRUE(context->ConnectToSecureTunnel());

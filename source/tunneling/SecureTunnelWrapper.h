@@ -67,6 +67,8 @@ namespace Aws
 
                     virtual int SendData(const Aws::Crt::ByteCursor &data);
 
+                    virtual int SendStreamReset();
+
                     virtual void Shutdown();
 
                     virtual bool IsValid();

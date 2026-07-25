@@ -16,6 +16,7 @@ namespace
     struct TcpForwardPendingWrite
     {
         std::vector<uint8_t> payload;
+        std::weak_ptr<Aws::Iot::DeviceClient::SecureTunneling::TcpForward> owner;
     };
 
     struct TcpForwardStopTask
@@ -45,9 +46,11 @@ namespace Aws
                 TcpForward::TcpForward(
                     std::shared_ptr<SharedCrtResourceManager> sharedCrtResourceManager,
                     uint16_t port,
-                    const OnTcpForwardDataReceive &onTcpForwardDataReceive)
+                    const OnTcpForwardDataReceive &onTcpForwardDataReceive,
+                    const OnTcpForwardTerminated &onTcpForwardTerminated)
                     : mSharedCrtResourceManager(sharedCrtResourceManager), mPort(port),
-                      mOnTcpForwardDataReceive(onTcpForwardDataReceive)
+                      mOnTcpForwardDataReceive(onTcpForwardDataReceive),
+                      mOnTcpForwardTerminated(onTcpForwardTerminated)
                 {
                     AWS_ZERO_STRUCT(mSocket);
                     Aws::Crt::Io::SocketOptions socketOptions;
@@ -119,7 +122,11 @@ namespace Aws
                     return result;
                 }
 
-                void TcpForward::Stop()
+                void TcpForward::Stop() { RequestStop(false, AWS_OP_SUCCESS); }
+
+                void TcpForward::StopAfterError(int errorCode) { RequestStop(true, errorCode); }
+
+                void TcpForward::RequestStop(bool notifyOwner, int errorCode)
                 {
                     shared_ptr<TcpForward> self;
                     aws_event_loop *eventLoop;
@@ -141,15 +148,15 @@ namespace Aws
 
                     if (!eventLoop || aws_event_loop_thread_is_callers_thread(eventLoop))
                     {
-                        StopOnEventLoop();
+                        StopOnEventLoop(notifyOwner, errorCode);
                         return;
                     }
 
                     unique_ptr<TcpForwardStopTask> stopTask(new TcpForwardStopTask());
-                    stopTask->callback = [self](enum aws_task_status status) {
+                    stopTask->callback = [self, notifyOwner, errorCode](enum aws_task_status status) {
                         if (status == AWS_TASK_STATUS_RUN_READY)
                         {
-                            self->StopOnEventLoop();
+                            self->StopOnEventLoop(notifyOwner, errorCode);
                         }
                         else
                         {
@@ -167,19 +174,53 @@ namespace Aws
 
                 int TcpForward::SendData(const Crt::ByteCursor &data)
                 {
-                    lock_guard<mutex> lock(mLifecycleLock);
-                    if (mStopRequested || mStopped)
+                    int result = AWS_OP_SUCCESS;
+                    int errorCode = AWS_OP_SUCCESS;
+                    bool stopAfterError = false;
                     {
-                        return AWS_OP_ERR;
+                        lock_guard<mutex> lock(mLifecycleLock);
+                        if (mStopRequested || mStopped)
+                        {
+                            return AWS_OP_ERR;
+                        }
+
+                        if (!mConnected)
+                        {
+                            LOG_DEBUG(TAG, "Not connected yet. Saving the data to send");
+                            if (
+                                mSendBuffer.len > MAX_SEND_BUFFER_SIZE ||
+                                data.len > MAX_SEND_BUFFER_SIZE - mSendBuffer.len)
+                            {
+                                LOG_ERROR(TAG, "Local TCP pre-connection buffer limit exceeded.");
+                                result = aws_raise_error(AWS_ERROR_SHORT_BUFFER);
+                            }
+                            else
+                            {
+                                result = aws_byte_buf_append_dynamic(&mSendBuffer, &data);
+                            }
+
+                            if (result != AWS_OP_SUCCESS)
+                            {
+                                errorCode = aws_last_error();
+                                stopAfterError = true;
+                            }
+                        }
+                        else
+                        {
+                            result = QueueWrite(data);
+                            if (result != AWS_OP_SUCCESS)
+                            {
+                                errorCode = aws_last_error();
+                                stopAfterError = true;
+                            }
+                        }
                     }
 
-                    if (!mConnected)
+                    if (stopAfterError)
                     {
-                        LOG_DEBUG(TAG, "Not connected yet. Saving the data to send");
-                        return aws_byte_buf_append_dynamic(&mSendBuffer, &data);
+                        StopAfterError(errorCode);
                     }
-
-                    return QueueWrite(data);
+                    return result;
                 }
 
                 void TcpForward::sOnConnectionResult(struct aws_socket *socket, int error_code, void *user_data)
@@ -203,6 +244,11 @@ namespace Aws
                             "TcpForward::sOnWriteCompleted error_code=%d, bytes_written=%d",
                             error_code,
                             bytes_written);
+                        auto owner = pendingWrite->owner.lock();
+                        if (owner)
+                        {
+                            owner->StopAfterError(error_code);
+                        }
                     }
                 }
 
@@ -218,6 +264,7 @@ namespace Aws
                     if (error_code)
                     {
                         LOGM_ERROR(TAG, "TcpForward::OnConnectionResult error_code=%d", error_code);
+                        StopAfterError(error_code);
                         return;
                     }
 
@@ -229,9 +276,14 @@ namespace Aws
                         }
                     }
 
-                    if (aws_socket_subscribe_to_readable_events(&mSocket, sOnReadable, this) != AWS_OP_SUCCESS)
+                    if (SubscribeToReadableEvents() != AWS_OP_SUCCESS)
                     {
-                        LOG_ERROR(TAG, "Cannot subscribe to local TCP socket read events.");
+                        int subscribeError = aws_last_error();
+                        LOGM_ERROR(
+                            TAG,
+                            "Cannot subscribe to local TCP socket read events. error_code=%d",
+                            subscribeError);
+                        StopAfterError(subscribeError);
                         return;
                     }
 
@@ -246,7 +298,12 @@ namespace Aws
 
                     if (FlushSendBuffer() != AWS_OP_SUCCESS)
                     {
-                        LOG_ERROR(TAG, "Cannot flush buffered data to the local TCP socket.");
+                        int flushError = aws_last_error();
+                        LOGM_ERROR(
+                            TAG,
+                            "Cannot flush buffered data to the local TCP socket. error_code=%d",
+                            flushError);
+                        StopAfterError(flushError);
                     }
                 }
 
@@ -263,11 +320,17 @@ namespace Aws
                     return aws_socket_write(&mSocket, &data, onWriteCompleted, userData);
                 }
 
+                int TcpForward::SubscribeToReadableEvents()
+                {
+                    return aws_socket_subscribe_to_readable_events(&mSocket, sOnReadable, this);
+                }
+
                 void TcpForward::OnReadable(struct aws_socket *, int error_code)
                 {
                     if (error_code && error_code != AWS_IO_SOCKET_CLOSED)
                     {
                         LOGM_ERROR(TAG, "TcpForward::OnReadable error_code=%d", error_code);
+                        StopAfterError(error_code);
                         return;
                     }
                     if (error_code == AWS_IO_SOCKET_CLOSED)
@@ -279,32 +342,73 @@ namespace Aws
                         LOG_TRACE(TAG, "TcpForward::OnReadable");
                     }
 
-                    Aws::Crt::ByteBuf everything; // For cumulating everything available
-                    aws_byte_buf_init(&everything, mSharedCrtResourceManager->getAllocator(), 0);
+                    bool terminal = error_code == AWS_IO_SOCKET_CLOSED;
+                    int terminalError = error_code;
+
+                    Aws::Crt::ByteBuf everything{}; // For cumulating everything available
+                    if (aws_byte_buf_init(&everything, mSharedCrtResourceManager->getAllocator(), 0) != AWS_OP_SUCCESS)
+                    {
+                        StopAfterError(aws_last_error());
+                        return;
+                    }
 
                     constexpr size_t chunkCapacity = 1024;
-                    Aws::Crt::ByteBuf chunk;
-                    aws_byte_buf_init(&chunk, mSharedCrtResourceManager->getAllocator(), chunkCapacity);
+                    Aws::Crt::ByteBuf chunk{};
+                    if (
+                        aws_byte_buf_init(&chunk, mSharedCrtResourceManager->getAllocator(), chunkCapacity) !=
+                        AWS_OP_SUCCESS)
+                    {
+                        int bufferError = aws_last_error();
+                        aws_byte_buf_clean_up(&everything);
+                        StopAfterError(bufferError);
+                        return;
+                    }
+
                     size_t amountRead = 0;
                     do
                     {
                         aws_byte_buf_reset(&chunk, false);
                         amountRead = 0;
-                        if (ReadSocket(&chunk, &amountRead) == AWS_OP_SUCCESS && amountRead > 0)
+                        int readResult = ReadSocket(&chunk, &amountRead);
+                        if (readResult == AWS_OP_SUCCESS && amountRead > 0)
                         {
                             aws_byte_cursor chunkCursor = aws_byte_cursor_from_buf(&chunk);
-                            aws_byte_buf_append_dynamic(&everything, &chunkCursor);
+                            if (aws_byte_buf_append_dynamic(&everything, &chunkCursor) != AWS_OP_SUCCESS)
+                            {
+                                terminal = true;
+                                terminalError = aws_last_error();
+                                break;
+                            }
+                        }
+                        else if (readResult != AWS_OP_SUCCESS)
+                        {
+                            int readError = aws_last_error();
+                            if (readError != AWS_IO_READ_WOULD_BLOCK)
+                            {
+                                terminal = true;
+                                terminalError = readError;
+                                if (readError != AWS_IO_SOCKET_CLOSED)
+                                {
+                                    LOGM_ERROR(TAG, "Cannot read from local TCP socket. error_code=%d", readError);
+                                }
+                            }
+                            break;
                         }
                     } while (amountRead > 0);
 
                     // Send everything
-                    if (mOnTcpForwardDataReceive)
+                    if (everything.len > 0 && mOnTcpForwardDataReceive)
                     {
                         mOnTcpForwardDataReceive(everything);
                     }
 
                     aws_byte_buf_clean_up(&chunk);
                     aws_byte_buf_clean_up(&everything);
+
+                    if (terminal)
+                    {
+                        StopAfterError(terminalError);
+                    }
                 }
 
                 int TcpForward::FlushSendBuffer()
@@ -334,6 +438,7 @@ namespace Aws
 
                     unique_ptr<TcpForwardPendingWrite> pendingWrite(new TcpForwardPendingWrite());
                     pendingWrite->payload.assign(data.ptr, data.ptr + data.len);
+                    pendingWrite->owner = shared_from_this();
                     aws_byte_cursor cursor =
                         aws_byte_cursor_from_array(pendingWrite->payload.data(), pendingWrite->payload.size());
 
@@ -345,9 +450,12 @@ namespace Aws
                     return result;
                 }
 
-                void TcpForward::StopOnEventLoop()
+                void TcpForward::StopOnEventLoop(bool notifyOwner, int errorCode)
                 {
                     shared_ptr<TcpForward> self;
+                    OnTcpForwardTerminated onTcpForwardTerminated;
+                    bool cleanUpSocket = false;
+                    bool cleanUpSendBuffer = false;
                     {
                         lock_guard<mutex> lock(mLifecycleLock);
                         if (mStopped)
@@ -356,19 +464,33 @@ namespace Aws
                         }
 
                         self = mLifetimeKeepAlive;
-                        if (mSocketInitialized)
-                        {
-                            aws_socket_clean_up(&mSocket);
-                            mSocketInitialized = false;
-                        }
-                        if (mSendBufferInitialized)
-                        {
-                            aws_byte_buf_clean_up(&mSendBuffer);
-                            mSendBufferInitialized = false;
-                        }
+                        cleanUpSocket = mSocketInitialized;
+                        cleanUpSendBuffer = mSendBufferInitialized;
+                        mSocketInitialized = false;
+                        mSendBufferInitialized = false;
                         mConnected = false;
                         mStopped = true;
+                        if (notifyOwner)
+                        {
+                            onTcpForwardTerminated = mOnTcpForwardTerminated;
+                        }
                         mLifetimeKeepAlive.reset();
+                    }
+
+                    // Socket cleanup may synchronously complete pending writes. Mark the
+                    // forward stopped and release the lock before invoking those callbacks.
+                    if (cleanUpSocket)
+                    {
+                        aws_socket_clean_up(&mSocket);
+                    }
+                    if (cleanUpSendBuffer)
+                    {
+                        aws_byte_buf_clean_up(&mSendBuffer);
+                    }
+
+                    if (onTcpForwardTerminated)
+                    {
+                        onTcpForwardTerminated(this, errorCode);
                     }
                 }
 

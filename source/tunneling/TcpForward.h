@@ -18,8 +18,11 @@ namespace Aws
         {
             namespace SecureTunneling
             {
+                class TcpForward;
+
                 // Client callback
                 using OnTcpForwardDataReceive = std::function<void(const Crt::ByteBuf &data)>;
+                using OnTcpForwardTerminated = std::function<void(TcpForward *tcpForward, int errorCode)>;
 
                 class TcpForwardTestAccess;
 
@@ -45,7 +48,8 @@ namespace Aws
                     TcpForward(
                         std::shared_ptr<SharedCrtResourceManager> sharedCrtResourceManager,
                         uint16_t port,
-                        const OnTcpForwardDataReceive &onTcpForwardDataReceive);
+                        const OnTcpForwardDataReceive &onTcpForwardDataReceive,
+                        const OnTcpForwardTerminated &onTcpForwardTerminated = nullptr);
 
                     /**
                      * \brief Constructor with no callback
@@ -125,6 +129,11 @@ namespace Aws
                         void *userData);
 
                     /**
+                     * \brief Wrapper around aws_socket_subscribe_to_readable_events
+                     */
+                    virtual int SubscribeToReadableEvents();
+
+                    /**
                      * \brief Callback when the socket has data to read
                      */
                     void OnReadable(struct aws_socket *socket, int error_code);
@@ -142,7 +151,17 @@ namespace Aws
                     /**
                      * \brief Close and clean up the socket on its owning event loop
                      */
-                    void StopOnEventLoop();
+                    void StopOnEventLoop(bool notifyOwner, int errorCode);
+
+                    /**
+                     * \brief Request socket cleanup and notify the owner about a terminal local failure
+                     */
+                    void StopAfterError(int errorCode);
+
+                    /**
+                     * \brief Request socket cleanup, optionally reporting a terminal local failure
+                     */
+                    void RequestStop(bool notifyOwner, int errorCode);
 
                     /**
                      * \brief Preserve callback lifetime when the event loop cancels the stop task
@@ -172,6 +191,11 @@ namespace Aws
                      * \brief Callback when data is received from the local TCP port
                      */
                     OnTcpForwardDataReceive mOnTcpForwardDataReceive;
+
+                    /**
+                     * \brief Callback when the local TCP connection terminates unexpectedly
+                     */
+                    OnTcpForwardTerminated mOnTcpForwardTerminated;
 
                     /**
                      * \brief An AWS SDK socket object. It manages the connection to the local TCP port.
@@ -228,6 +252,11 @@ namespace Aws
                      * connected.
                      */
                     Aws::Crt::ByteBuf mSendBuffer{};
+
+                    /**
+                     * \brief Maximum data retained while the local TCP connection is pending
+                     */
+                    static constexpr size_t MAX_SEND_BUFFER_SIZE = 63 * 1024;
                 };
             } // namespace SecureTunneling
         }     // namespace DeviceClient
