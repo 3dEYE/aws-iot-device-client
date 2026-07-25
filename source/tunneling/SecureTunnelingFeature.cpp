@@ -389,28 +389,28 @@ namespace Aws
 
                     auto context = createContext(accessToken, region, port);
 
-                    if (!context->ConnectToSecureTunnel())
-                    {
-                        return;
-                    }
-
-                    bool discardContext = false;
                     {
                         lock_guard<mutex> lock(mConnectionRecoveryLock);
                         if (!mStarted || featureLifecycleGeneration != mFeatureLifecycleGeneration)
                         {
-                            discardContext = true;
+                            LOG_DEBUG(TAG, "Ignoring tunnel notification invalidated by a feature lifecycle change");
+                            return;
                         }
-                        else
-                        {
-                            mContexts.push_back(context);
-                        }
+
+                        mContexts.push_back(context);
                     }
 
-                    if (discardContext)
+                    if (!context->ConnectToSecureTunnel())
                     {
-                        LOG_DEBUG(TAG, "Stopping tunnel opened after a feature lifecycle change");
-                        context->StopSecureTunnel();
+                        lock_guard<mutex> lock(mConnectionRecoveryLock);
+                        auto it = find_if(
+                            mContexts.begin(), mContexts.end(), [&](const shared_ptr<SecureTunnelingContext> &c) {
+                                return c.get() == context.get();
+                            });
+                        if (it != mContexts.end())
+                        {
+                            mContexts.erase(it);
+                        }
                     }
                 }
 

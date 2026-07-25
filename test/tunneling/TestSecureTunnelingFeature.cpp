@@ -75,6 +75,16 @@ class FakeSecureTunnelContext : public SecureTunnelingContext
     bool IsDuplicateNotification(const SecureTunnelingNotifyResponse &response) override { return true; }
 };
 
+class FailingSecureTunnelContext : public SecureTunnelingContext
+{
+  public:
+    FailingSecureTunnelContext() : SecureTunnelingContext() {}
+    ~FailingSecureTunnelContext() = default;
+    bool ConnectToSecureTunnel() override { return false; }
+    void StopSecureTunnel() override {}
+    bool IsDuplicateNotification(const SecureTunnelingNotifyResponse &) override { return true; }
+};
+
 struct BlockingSecureTunnelContextState
 {
     shared_ptr<promise<void>> connectEntered;
@@ -618,6 +628,44 @@ TEST_F(TestSecureTunnelingFeature, TunnelNotificationAfterStopIsIgnored)
     notificationHandler(response.get(), 0);
 }
 
+TEST_F(TestSecureTunnelingFeature, FailedTunnelStartDoesNotLeaveRegisteredContext)
+{
+    string accessToken = "12345";
+    string region = "us-west-2";
+    uint16_t port = 22;
+    Aws::Crt::Vector<Aws::Crt::String> services;
+    services.push_back("SSH");
+
+    response->ClientMode = "destination";
+    response->Services = services;
+    response->ClientAccessToken = accessToken.c_str();
+    response->Region = region.c_str();
+
+    auto failingContext = make_shared<FailingSecureTunnelContext>();
+    Iotsecuretunneling::OnSubscribeToTunnelsNotifyResponse notificationHandler;
+    EXPECT_CALL(*secureTunnelingFeature, createContext(StrEq(accessToken), StrEq(region), Eq(port)))
+        .Times(2)
+        .WillOnce(Return(failingContext))
+        .WillOnce(Return(fakeContext));
+    EXPECT_CALL(*secureTunnelingFeature, createClient()).Times(1).WillOnce(Return(mockClient));
+    EXPECT_CALL(*mockClient, SubscribeToTunnelsNotify(ThingNameEq(thingName), AWS_MQTT_QOS_AT_LEAST_ONCE, _, _))
+        .Times(1)
+        .WillOnce(DoAll(SaveArg<2>(&notificationHandler), InvokeArgument<3>(0), Return(true)));
+    EXPECT_CALL(*notifier, onEvent(secureTunnelingFeature.get(), ClientBaseEventNotification::FEATURE_STARTED))
+        .Times(1);
+    EXPECT_CALL(*notifier, onEvent(secureTunnelingFeature.get(), ClientBaseEventNotification::FEATURE_STOPPED))
+        .Times(1);
+
+    secureTunnelingFeature->init(manager, notifier, config);
+    secureTunnelingFeature->start();
+    ASSERT_TRUE(static_cast<bool>(notificationHandler));
+
+    notificationHandler(response.get(), 0);
+    notificationHandler(response.get(), 0);
+
+    secureTunnelingFeature->stop();
+}
+
 TEST_F(TestSecureTunnelingFeature, SessionRecoveryPreservesTunnelConnectionAlreadyInProgress)
 {
     string accessToken = "12345";
@@ -832,13 +880,13 @@ TEST_F(TestSecureTunnelingFeature, StopDoesNotWaitForTunnelConnectionAndRetainsS
     }
     stopThread.join();
 
+    EXPECT_EQ(future_status::ready, stopRequestedFuture.wait_for(chrono::seconds(0)));
     secureTunnelingFeature.reset();
     EXPECT_FALSE(weakFeature.expired());
 
     allowConnect->set_value();
     notificationThread.join();
 
-    EXPECT_EQ(future_status::ready, stopRequestedFuture.wait_for(chrono::seconds(0)));
     EXPECT_EQ(future_status::timeout, contextDestroyedFuture.wait_for(chrono::seconds(0)));
     EXPECT_TRUE(weakFeature.expired());
 
