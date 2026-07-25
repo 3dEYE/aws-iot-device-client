@@ -78,6 +78,9 @@ namespace
     {
       public:
         aws_allocator *getAllocator() override { return aws_default_allocator(); }
+
+      private:
+        Aws::Crt::ApiHandle apiHandle;
     };
 
     class SocketTestCrtResourceManager : public SharedCrtResourceManager
