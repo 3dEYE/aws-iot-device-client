@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #include "SecureTunnelWrapper.h"
+#include <aws/iotdevice/secure_tunneling.h>
 
 using namespace Aws;
 using namespace Aws::Iot;
@@ -95,6 +96,19 @@ int SecureTunnelWrapper::Close()
 int SecureTunnelWrapper::SendData(const Aws::Crt::ByteCursor &data)
 {
     return secureTunnel ? secureTunnel->SendData(data) : AWS_OP_ERR;
+}
+
+int SecureTunnelWrapper::SendStreamReset()
+{
+    if (!secureTunnel || !secureTunnel->GetUnderlyingHandle())
+    {
+        return AWS_OP_ERR;
+    }
+
+    // The pinned SDK's C++ helper passes a null options pointer to a non-null C API contract.
+    // Supply the empty V1 message view explicitly.
+    aws_secure_tunnel_message_view messageOptions{};
+    return aws_secure_tunnel_stream_reset(secureTunnel->GetUnderlyingHandle(), &messageOptions);
 }
 
 void SecureTunnelWrapper::Shutdown()

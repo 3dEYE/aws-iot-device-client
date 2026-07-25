@@ -185,6 +185,7 @@ namespace Aws
                     if (!SecureTunnelingFeature::IsValidPort(mPort))
                     {
                         LOGM_ERROR(TAG, "Cannot connect to invalid local port. port=%u", mPort);
+                        ResetSecureTunnelStream();
                         return;
                     }
 
@@ -193,14 +194,31 @@ namespace Aws
                     if (!tcpForward)
                     {
                         LOG_ERROR(TAG, "Cannot create local TCP forward.");
+                        ResetSecureTunnelStream();
                         return;
                     }
 
-                    mTcpForward = tcpForward;
+                    bool shouldConnect;
+                    {
+                        lock_guard<mutex> lock(mLifecycleLock);
+                        shouldConnect = !mStopRequested && !mStopped;
+                        if (shouldConnect)
+                        {
+                            mTcpForward = tcpForward;
+                        }
+                    }
+                    if (!shouldConnect)
+                    {
+                        tcpForward->Stop();
+                        return;
+                    }
+
                     if (tcpForward->Connect() != AWS_OP_SUCCESS)
                     {
+                        int connectError = aws_last_error();
                         LOG_ERROR(TAG, "Cannot connect to local TCP port.");
-                        StopTcpForward();
+                        tcpForward->Stop();
+                        OnTcpForwardTerminated(tcpForward.get(), connectError);
                     }
                 }
 
@@ -208,10 +226,33 @@ namespace Aws
 
                 void SecureTunnelingContext::StopTcpForward()
                 {
-                    auto tcpForward = std::move(mTcpForward);
+                    shared_ptr<TcpForward> tcpForward;
+                    {
+                        lock_guard<mutex> lock(mLifecycleLock);
+                        tcpForward = std::move(mTcpForward);
+                    }
                     if (tcpForward)
                     {
                         tcpForward->Stop();
+                    }
+                }
+
+                void SecureTunnelingContext::ResetSecureTunnelStream()
+                {
+                    shared_ptr<SecureTunnelWrapper> secureTunnel;
+                    {
+                        lock_guard<mutex> lock(mLifecycleLock);
+                        if (mStopRequested || mStopped || !mSecureTunnel)
+                        {
+                            return;
+                        }
+                        secureTunnel = mSecureTunnel;
+                    }
+
+                    if (secureTunnel->SendStreamReset() != AWS_OP_SUCCESS)
+                    {
+                        LOG_ERROR(TAG, "Cannot reset secure tunnel stream; stopping the tunnel.");
+                        StopSecureTunnel();
                     }
                 }
 
@@ -229,10 +270,14 @@ namespace Aws
                     }
                 }
 
-                void SecureTunnelingContext::OnDataReceive(const Crt::ByteBuf &data) const
+                void SecureTunnelingContext::OnDataReceive(const Crt::ByteBuf &data)
                 {
                     LOGM_TRACE(TAG, "SecureTunnelingContext::OnDataReceive data.len=%zu", data.len);
-                    auto tcpForward = mTcpForward;
+                    shared_ptr<TcpForward> tcpForward;
+                    {
+                        lock_guard<mutex> lock(mLifecycleLock);
+                        tcpForward = mTcpForward;
+                    }
                     if (tcpForward)
                     {
                         tcpForward->SendData(aws_byte_cursor_from_buf(&data));
@@ -296,6 +341,21 @@ namespace Aws
                 {
                     LOGM_TRACE(TAG, "SecureTunnelingContext::OnTcpForwardDataReceive data.len=%zu", data.len);
                     mSecureTunnel->SendData(aws_byte_cursor_from_buf(&data));
+                }
+
+                void SecureTunnelingContext::OnTcpForwardTerminated(TcpForward *tcpForward, int errorCode)
+                {
+                    LOGM_DEBUG(TAG, "Local TCP connection terminated. errorCode=%d", errorCode);
+                    {
+                        lock_guard<mutex> lock(mLifecycleLock);
+                        if (mTcpForward.get() != tcpForward)
+                        {
+                            return;
+                        }
+                        mTcpForward.reset();
+                    }
+
+                    ResetSecureTunnelStream();
                 }
 
                 void SecureTunnelingContext::StopSecureTunnel()
@@ -479,6 +539,13 @@ namespace Aws
                             if (self)
                             {
                                 self->OnTcpForwardDataReceive(data);
+                            }
+                        },
+                        [weakSelf](TcpForward *tcpForward, int errorCode) {
+                            auto self = weakSelf.lock();
+                            if (self)
+                            {
+                                self->OnTcpForwardTerminated(tcpForward, errorCode);
                             }
                         });
                 }

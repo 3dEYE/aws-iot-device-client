@@ -107,6 +107,11 @@ namespace Aws
                      */
                     void OnTcpForwardDataReceive(const Crt::ByteBuf &data) const;
 
+                    /**
+                     * \brief Callback when the local TCP connection terminates unexpectedly
+                     */
+                    void OnTcpForwardTerminated(TcpForward *tcpForward, int errorCode);
+
                   private:
                     /**
                      * \brief Create a Secure Tunnel instance
@@ -148,6 +153,11 @@ namespace Aws
                      */
                     void StopTcpForward();
 
+                    /**
+                     * \brief Notify the tunnel peer that the active local TCP stream has ended
+                     */
+                    void ResetSecureTunnelStream();
+
                     //
                     // Secure tunneling protocol client callbacks
                     //
@@ -169,7 +179,7 @@ namespace Aws
                      *
                      * @param data data received from the secure tunnel
                      */
-                    void OnDataReceive(const Crt::ByteBuf &data) const;
+                    void OnDataReceive(const Crt::ByteBuf &data);
 
                     /**
                      * \brief Callback when secure tunnel stream_start is received
