@@ -161,9 +161,9 @@ namespace Aws
 
                     /**
                      * \brief a helper function to get SecureTunnelingContext in order to facilitate testing
-                     * Pass an empty unique_ptr and set value in order to allow mocking
+                     * Pass an empty shared_ptr and set value in order to allow mocking
                      */
-                    virtual std::unique_ptr<SecureTunnelingContext> createContext(
+                    virtual std::shared_ptr<SecureTunnelingContext> createContext(
                         const std::string &accessToken,
                         const std::string &region,
                         const uint16_t &port);
@@ -174,7 +174,7 @@ namespace Aws
                      * @param contextToRemove a SecureTunnelingContext that represents the secure tunnel that was
                      * shutdown
                      */
-                    void OnConnectionShutdown(SecureTunnelingContext *contextToRemove);
+                    void OnTunnelStopped(SecureTunnelingContext *contextToRemove);
 
                     //
                     // Member variables
@@ -286,7 +286,7 @@ namespace Aws
                      * \brief A vector of SecureTunnelingContext. Each context represents an active secure tunneling
                      * session.
                      */
-                    std::vector<std::unique_ptr<SecureTunnelingContext>> mContexts;
+                    std::vector<std::shared_ptr<SecureTunnelingContext>> mContexts;
                 };
             } // namespace SecureTunneling
         }     // namespace DeviceClient

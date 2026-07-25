@@ -70,6 +70,7 @@ namespace Aws
                 int SecureTunnelingFeature::stop()
                 {
                     LOG_DEBUG(TAG, "SecureTunnelingFeature::stop");
+                    vector<shared_ptr<SecureTunnelingContext>> contexts;
                     {
                         lock_guard<mutex> subscriptionLifecycleLock(mSubscriptionLifecycleLock);
                         lock_guard<mutex> lock(mConnectionRecoveryLock);
@@ -78,8 +79,9 @@ namespace Aws
                         ++mConnectionRecoveryGeneration;
                         mOldestValidSubscriptionGeneration = mConnectionRecoveryGeneration;
                         ++mFeatureLifecycleGeneration;
+                        contexts = mContexts;
                     }
-                    for (auto &c : mContexts)
+                    for (auto &c : contexts)
                     {
                         c->StopSecureTunnel();
                     }
@@ -387,19 +389,29 @@ namespace Aws
 
                     auto context = createContext(accessToken, region, port);
 
+                    {
+                        lock_guard<mutex> lock(mConnectionRecoveryLock);
+                        if (!mStarted || featureLifecycleGeneration != mFeatureLifecycleGeneration)
+                        {
+                            LOG_DEBUG(TAG, "Ignoring tunnel notification invalidated by a feature lifecycle change");
+                            return;
+                        }
+
+                        mContexts.push_back(context);
+                    }
+
                     if (!context->ConnectToSecureTunnel())
                     {
-                        return;
+                        lock_guard<mutex> lock(mConnectionRecoveryLock);
+                        auto it = find_if(
+                            mContexts.begin(), mContexts.end(), [&](const shared_ptr<SecureTunnelingContext> &c) {
+                                return c.get() == context.get();
+                            });
+                        if (it != mContexts.end())
+                        {
+                            mContexts.erase(it);
+                        }
                     }
-
-                    lock_guard<mutex> lock(mConnectionRecoveryLock);
-                    if (!mStarted || featureLifecycleGeneration != mFeatureLifecycleGeneration)
-                    {
-                        LOG_DEBUG(TAG, "Discarding tunnel opened after a feature lifecycle change");
-                        return;
-                    }
-
-                    mContexts.push_back(std::move(context));
                 }
 
                 void SecureTunnelingFeature::OnSubscribeComplete(
@@ -534,19 +546,26 @@ namespace Aws
                     return endpoint;
                 }
 
-                std::unique_ptr<SecureTunnelingContext> SecureTunnelingFeature::createContext(
+                std::shared_ptr<SecureTunnelingContext> SecureTunnelingFeature::createContext(
                     const std::string &accessToken,
                     const std::string &region,
                     const uint16_t &port)
                 {
-                    return std::unique_ptr<SecureTunnelingContext>(new SecureTunnelingContext(
+                    weak_ptr<SecureTunnelingFeature> weakSelf = shared_from_this();
+                    return std::make_shared<SecureTunnelingContext>(
                         mSharedCrtResourceManager,
                         proxyOptions,
                         mRootCa,
                         accessToken,
                         GetEndpoint(region),
                         port,
-                        bind(&SecureTunnelingFeature::OnConnectionShutdown, this, placeholders::_1)));
+                        [weakSelf](SecureTunnelingContext *context) {
+                            auto self = weakSelf.lock();
+                            if (self)
+                            {
+                                self->OnTunnelStopped(context);
+                            }
+                        });
                 }
 
                 std::shared_ptr<AbstractIotSecureTunnelingClient> SecureTunnelingFeature::createClient()
@@ -555,14 +574,20 @@ namespace Aws
                         mSharedCrtResourceManager->getConnection());
                 }
 
-                void SecureTunnelingFeature::OnConnectionShutdown(SecureTunnelingContext *contextToRemove)
+                void SecureTunnelingFeature::OnTunnelStopped(SecureTunnelingContext *contextToRemove)
                 {
-                    LOG_DEBUG(TAG, "SecureTunnelingFeature::OnConnectionShutdown");
-                    auto it =
-                        find_if(mContexts.begin(), mContexts.end(), [&](const unique_ptr<SecureTunnelingContext> &c) {
-                            return c.get() == contextToRemove;
-                        });
-                    mContexts.erase(std::remove(mContexts.begin(), mContexts.end(), *it));
+                    LOG_DEBUG(TAG, "SecureTunnelingFeature::OnTunnelStopped");
+                    {
+                        lock_guard<mutex> lock(mConnectionRecoveryLock);
+                        auto it = find_if(
+                            mContexts.begin(), mContexts.end(), [&](const shared_ptr<SecureTunnelingContext> &c) {
+                                return c.get() == contextToRemove;
+                            });
+                        if (it != mContexts.end())
+                        {
+                            mContexts.erase(it);
+                        }
+                    }
 
 #if defined(DISABLE_MQTT)
                     LOG_INFO(TAG, "Secure Tunnel closed, component cleaning up open thread");

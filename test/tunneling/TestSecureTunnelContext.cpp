@@ -5,6 +5,9 @@
 #include "gmock/gmock.h"
 #include "gtest/gtest.h"
 #include <aws/common/allocator.h>
+#include <atomic>
+#include <thread>
+#include <vector>
 
 using namespace testing;
 using namespace std;
@@ -25,8 +28,8 @@ class MockSecureTunnelingContext : public SecureTunnelingContext
         const string &accessToken,
         const string &endpoint,
         const int port,
-        const OnConnectionShutdownFn &onConnectionShutdown)
-        : SecureTunnelingContext(manager, rootCa, accessToken, endpoint, port, onConnectionShutdown)
+        const OnStoppedFn &onStopped)
+        : SecureTunnelingContext(manager, rootCa, accessToken, endpoint, port, onStopped)
     {
     }
 
@@ -39,11 +42,37 @@ class MockSecureTunnelingContext : public SecureTunnelingContext
          const Aws::Iotsecuretunneling::OnDataReceive &onDataReceive,
          const Aws::Iotsecuretunneling::OnStreamStart &onStreamStart,
          const Aws::Iotsecuretunneling::OnStreamReset &onStreamReset,
-         const Aws::Iotsecuretunneling::OnSessionReset &onSessionReset),
+         const Aws::Iotsecuretunneling::OnSessionReset &onSessionReset,
+         const Aws::Iotsecuretunneling::OnStopped &onStopped),
         (override));
 
     MOCK_METHOD(std::shared_ptr<TcpForward>, CreateTcpForward, (), (override));
     MOCK_METHOD(void, DisconnectFromTcpForward, (), (override));
+
+    bool ScheduleLifecycleTask(std::function<void()> task, std::chrono::milliseconds delay) override
+    {
+        (void)delay;
+        if (deferLifecycleTasks)
+        {
+            scheduledLifecycleTasks.push_back(std::move(task));
+        }
+        else
+        {
+            task();
+        }
+        return true;
+    }
+
+    void RunNextLifecycleTask()
+    {
+        ASSERT_FALSE(scheduledLifecycleTasks.empty());
+        auto task = std::move(scheduledLifecycleTasks.front());
+        scheduledLifecycleTasks.erase(scheduledLifecycleTasks.begin());
+        task();
+    }
+
+    bool deferLifecycleTasks{false};
+    vector<std::function<void()>> scheduledLifecycleTasks;
 };
 
 class MockSecureTunnel : public SecureTunnelWrapper
@@ -64,6 +93,7 @@ class MockTcpForward : public TcpForward
     {
     }
     MOCK_METHOD(int, Connect, (), (override));
+    MOCK_METHOD(void, Stop, (), (override));
     MOCK_METHOD(int, SendData, (const Crt::ByteCursor &data), (override));
 };
 
@@ -80,7 +110,18 @@ class TestSecureTunnelContext : public testing::Test
         endpoint = "endpoint-value";
         port = 5555;
     }
-    unique_ptr<MockSecureTunnelingContext> context;
+
+    void TearDown() override
+    {
+        if (onStopped)
+        {
+            auto callback = std::move(onStopped);
+            callback(nullptr);
+        }
+        context.reset();
+    }
+
+    shared_ptr<MockSecureTunnelingContext> context;
     shared_ptr<MockSecureTunnel> tunnel;
     shared_ptr<MockTcpForward> tcpForward;
     shared_ptr<SharedCrtResourceManager> manager;
@@ -88,7 +129,8 @@ class TestSecureTunnelContext : public testing::Test
     string accessToken;
     string endpoint;
     int port;
-    OnConnectionShutdownFn onConnectionShutdown;
+    OnStoppedFn onStoppedNotification;
+    Aws::Iotsecuretunneling::OnStopped onStopped;
 };
 
 TEST_F(TestSecureTunnelContext, ConnectToSecureTunnelHappy)
@@ -97,12 +139,11 @@ TEST_F(TestSecureTunnelContext, ConnectToSecureTunnelHappy)
      * Create a MockSecureTunnelingContext and inject a MockSecureTunnel
      * Verify ConnectToSecureTunnel returns true
      */
-    context = unique_ptr<MockSecureTunnelingContext>(
-        new MockSecureTunnelingContext(manager, rootCa, accessToken, endpoint, port, nullptr));
+    context = make_shared<MockSecureTunnelingContext>(manager, rootCa, accessToken, endpoint, port, nullptr);
 
-    EXPECT_CALL(*context, CreateSecureTunnel(_, _, _, _, _, _, _)).WillOnce(Return(tunnel));
+    EXPECT_CALL(*context, CreateSecureTunnel(_, _, _, _, _, _, _, _))
+        .WillOnce(DoAll(SaveArg<7>(&onStopped), Return(tunnel)));
     EXPECT_CALL(*tunnel, Connect()).WillOnce(Return(0));
-    EXPECT_CALL(*tunnel, Close()).WillOnce(Return(0));
 
     ASSERT_TRUE(context->ConnectToSecureTunnel());
 }
@@ -113,8 +154,7 @@ TEST_F(TestSecureTunnelContext, ConnectToSecureTunnelMissingAccessToken)
      * Create a MockSecureTunnelingContext with an empty Access Token
      * Verify ConnectToSecureTunnel returns false
      */
-    context = unique_ptr<MockSecureTunnelingContext>(
-        new MockSecureTunnelingContext(manager, rootCa, "", "12345", port, nullptr));
+    context = make_shared<MockSecureTunnelingContext>(manager, rootCa, "", "12345", port, nullptr);
 
     ASSERT_FALSE(context->ConnectToSecureTunnel());
 }
@@ -125,8 +165,7 @@ TEST_F(TestSecureTunnelContext, ConnectToSecureTunnelMissingEndpoint)
      * Create a MockSecureTunnelingContext with an empty endpoint
      * Verify ConnectToSecureTunnel returns false
      */
-    context = unique_ptr<MockSecureTunnelingContext>(
-        new MockSecureTunnelingContext(manager, rootCa, "12345", "", port, nullptr));
+    context = make_shared<MockSecureTunnelingContext>(manager, rootCa, "12345", "", port, nullptr);
 
     ASSERT_FALSE(context->ConnectToSecureTunnel());
 }
@@ -138,14 +177,28 @@ TEST_F(TestSecureTunnelContext, OnStreamStartHappy)
      * Invoke OnStreamStart callback
      * Verify calls on TcpForward, SecureTunnel, and that ConnectToSecureTunnel returns true
      */
-    context = unique_ptr<MockSecureTunnelingContext>(
-        new MockSecureTunnelingContext(manager, rootCa, accessToken, endpoint, port, nullptr));
+    context = make_shared<MockSecureTunnelingContext>(manager, rootCa, accessToken, endpoint, port, nullptr);
 
-    EXPECT_CALL(*context, CreateSecureTunnel(_, _, _, _, _, _, _)).WillOnce(DoAll(InvokeArgument<4>(), Return(tunnel)));
+    EXPECT_CALL(*context, CreateSecureTunnel(_, _, _, _, _, _, _, _))
+        .WillOnce(DoAll(SaveArg<7>(&onStopped), InvokeArgument<4>(), Return(tunnel)));
     EXPECT_CALL(*context, CreateTcpForward()).WillOnce(Return(tcpForward));
     EXPECT_CALL(*tcpForward, Connect()).WillOnce(Return(0));
+    EXPECT_CALL(*tcpForward, Stop()).Times(1);
     EXPECT_CALL(*tunnel, Connect()).WillOnce(Return(0));
-    EXPECT_CALL(*tunnel, Close()).WillOnce(Return(0));
+
+    ASSERT_TRUE(context->ConnectToSecureTunnel());
+}
+
+TEST_F(TestSecureTunnelContext, TcpForwardConnectFailureStopsForward)
+{
+    context = make_shared<MockSecureTunnelingContext>(manager, rootCa, accessToken, endpoint, port, nullptr);
+
+    EXPECT_CALL(*context, CreateSecureTunnel(_, _, _, _, _, _, _, _))
+        .WillOnce(DoAll(SaveArg<7>(&onStopped), InvokeArgument<4>(), Return(tunnel)));
+    EXPECT_CALL(*context, CreateTcpForward()).WillOnce(Return(tcpForward));
+    EXPECT_CALL(*tcpForward, Connect()).WillOnce(Return(AWS_OP_ERR));
+    EXPECT_CALL(*tcpForward, Stop()).Times(1);
+    EXPECT_CALL(*tunnel, Connect()).WillOnce(Return(AWS_OP_SUCCESS));
 
     ASSERT_TRUE(context->ConnectToSecureTunnel());
 }
@@ -156,13 +209,12 @@ TEST_F(TestSecureTunnelContext, OnStreamStartInvalidPortLow)
      * Create a MockSecureTunnelContext with invalid (too low) port number and inject a mock SecureTunnel
      * Verify no create TcpForward
      */
-    context = unique_ptr<MockSecureTunnelingContext>(
-        new MockSecureTunnelingContext(manager, rootCa, accessToken, endpoint, 0, nullptr));
+    context = make_shared<MockSecureTunnelingContext>(manager, rootCa, accessToken, endpoint, 0, nullptr);
 
-    EXPECT_CALL(*context, CreateSecureTunnel(_, _, _, _, _, _, _)).WillOnce(DoAll(InvokeArgument<4>(), Return(tunnel)));
+    EXPECT_CALL(*context, CreateSecureTunnel(_, _, _, _, _, _, _, _))
+        .WillOnce(DoAll(SaveArg<7>(&onStopped), InvokeArgument<4>(), Return(tunnel)));
     EXPECT_CALL(*context, CreateTcpForward()).Times(0);
     EXPECT_CALL(*tunnel, Connect()).WillOnce(Return(0));
-    EXPECT_CALL(*tunnel, Close()).WillOnce(Return(0));
 
     ASSERT_TRUE(context->ConnectToSecureTunnel());
 }
@@ -173,13 +225,12 @@ TEST_F(TestSecureTunnelContext, OnStreamStartInvalidPortHigh)
      * Create a MockSecureTunnelContext with invalid (too high) port number and inject a mock SecureTunnel
      * Verify no create TcpForward
      */
-    context = unique_ptr<MockSecureTunnelingContext>(
-        new MockSecureTunnelingContext(manager, rootCa, accessToken, endpoint, 65536, nullptr));
+    context = make_shared<MockSecureTunnelingContext>(manager, rootCa, accessToken, endpoint, 65536, nullptr);
 
-    EXPECT_CALL(*context, CreateSecureTunnel(_, _, _, _, _, _, _)).WillOnce(DoAll(InvokeArgument<4>(), Return(tunnel)));
+    EXPECT_CALL(*context, CreateSecureTunnel(_, _, _, _, _, _, _, _))
+        .WillOnce(DoAll(SaveArg<7>(&onStopped), InvokeArgument<4>(), Return(tunnel)));
     EXPECT_CALL(*context, CreateTcpForward()).Times(0);
     EXPECT_CALL(*tunnel, Connect()).WillOnce(Return(0));
-    EXPECT_CALL(*tunnel, Close()).WillOnce(Return(0));
 
     ASSERT_TRUE(context->ConnectToSecureTunnel());
 }
@@ -191,13 +242,12 @@ TEST_F(TestSecureTunnelContext, OnStreamReset)
      * Invoke OnStreamReset callback
      * Verify calls on tunnel and DisconnectTcpForward, ConnectToSecureTunnel returns true
      */
-    context = unique_ptr<MockSecureTunnelingContext>(
-        new MockSecureTunnelingContext(manager, rootCa, accessToken, endpoint, port, nullptr));
+    context = make_shared<MockSecureTunnelingContext>(manager, rootCa, accessToken, endpoint, port, nullptr);
 
-    EXPECT_CALL(*context, CreateSecureTunnel(_, _, _, _, _, _, _)).WillOnce(DoAll(InvokeArgument<5>(), Return(tunnel)));
+    EXPECT_CALL(*context, CreateSecureTunnel(_, _, _, _, _, _, _, _))
+        .WillOnce(DoAll(SaveArg<7>(&onStopped), InvokeArgument<5>(), Return(tunnel)));
     EXPECT_CALL(*context, DisconnectFromTcpForward()).Times(1);
     EXPECT_CALL(*tunnel, Connect()).WillOnce(Return(0));
-    EXPECT_CALL(*tunnel, Close()).WillOnce(Return(0));
 
     ASSERT_TRUE(context->ConnectToSecureTunnel());
 }
@@ -209,13 +259,12 @@ TEST_F(TestSecureTunnelContext, OnSessionReset)
      * Invoke OnSessionReset callback
      * Verify calls on tunnel and DisconnectTcpForward, ConnectToSecureTunnel returns true
      */
-    context = unique_ptr<MockSecureTunnelingContext>(
-        new MockSecureTunnelingContext(manager, rootCa, accessToken, endpoint, port, nullptr));
+    context = make_shared<MockSecureTunnelingContext>(manager, rootCa, accessToken, endpoint, port, nullptr);
 
-    EXPECT_CALL(*context, CreateSecureTunnel(_, _, _, _, _, _, _)).WillOnce(DoAll(InvokeArgument<6>(), Return(tunnel)));
+    EXPECT_CALL(*context, CreateSecureTunnel(_, _, _, _, _, _, _, _))
+        .WillOnce(DoAll(SaveArg<7>(&onStopped), InvokeArgument<6>(), Return(tunnel)));
     EXPECT_CALL(*context, DisconnectFromTcpForward()).Times(1);
     EXPECT_CALL(*tunnel, Connect()).WillOnce(Return(0));
-    EXPECT_CALL(*tunnel, Close()).WillOnce(Return(0));
 
     ASSERT_TRUE(context->ConnectToSecureTunnel());
 }
@@ -229,38 +278,188 @@ TEST_F(TestSecureTunnelContext, OnDataReceive)
      */
     Crt::ByteBuf data = ByteBufFromCString("Test Data");
 
-    context = unique_ptr<MockSecureTunnelingContext>(
-        new MockSecureTunnelingContext(manager, rootCa, accessToken, endpoint, port, nullptr));
+    context = make_shared<MockSecureTunnelingContext>(manager, rootCa, accessToken, endpoint, port, nullptr);
 
-    EXPECT_CALL(*context, CreateSecureTunnel(_, _, _, _, _, _, _))
-        .WillOnce(DoAll(InvokeArgument<4>(), InvokeArgument<3>(data), Return(tunnel)));
+    EXPECT_CALL(*context, CreateSecureTunnel(_, _, _, _, _, _, _, _))
+        .WillOnce(
+            DoAll(SaveArg<7>(&onStopped), InvokeArgument<4>(), InvokeArgument<3>(data), Return(tunnel)));
     EXPECT_CALL(*context, CreateTcpForward()).WillOnce(Return(tcpForward));
     EXPECT_CALL(*tcpForward, Connect()).WillOnce(Return(0));
+    EXPECT_CALL(*tcpForward, Stop()).Times(1);
     EXPECT_CALL(*tcpForward, SendData(_)).Times(1);
     EXPECT_CALL(*tunnel, Connect()).WillOnce(Return(0));
-    EXPECT_CALL(*tunnel, Close()).WillOnce(Return(0));
 
     ASSERT_TRUE(context->ConnectToSecureTunnel());
 }
 
-TEST_F(TestSecureTunnelContext, OnConnectionShutdown)
+TEST_F(TestSecureTunnelContext, StopRetainsContextUntilOnStopped)
 {
     /**
-     * Creates onConnectionShutdown Lambda to set promise on invoke
-     * Creates MockSecureTunnelingContext with onConnectionShutdown lambda
-     * Invokes onConnectionShutdown
-     * Verifies onConnectionShutdown invocation via promise
+     * Requests asynchronous tunnel shutdown, releases the caller's context reference,
+     * and verifies the context remains alive until the SDK reports OnStopped.
      */
     std::promise<void> promise;
-    onConnectionShutdown = [&](SecureTunnelingContext *) -> void { promise.set_value(); };
-    context = unique_ptr<MockSecureTunnelingContext>(
-        new MockSecureTunnelingContext(manager, rootCa, accessToken, endpoint, port, onConnectionShutdown));
+    auto stoppedFuture = promise.get_future();
+    onStoppedNotification = [&](SecureTunnelingContext *) -> void { promise.set_value(); };
+    context =
+        make_shared<MockSecureTunnelingContext>(manager, rootCa, accessToken, endpoint, port, onStoppedNotification);
 
-    EXPECT_CALL(*context, CreateSecureTunnel(_, _, _, _, _, _, _)).WillOnce(DoAll(InvokeArgument<1>(), Return(tunnel)));
+    EXPECT_CALL(*context, CreateSecureTunnel(_, _, _, _, _, _, _, _))
+        .WillOnce(DoAll(SaveArg<7>(&onStopped), Return(tunnel)));
     EXPECT_CALL(*tunnel, Connect()).WillOnce(Return(0));
     EXPECT_CALL(*tunnel, Close()).WillOnce(Return(0));
 
     ASSERT_TRUE(context->ConnectToSecureTunnel());
+    context->StopSecureTunnel();
 
-    EXPECT_EQ(std::future_status::ready, promise.get_future().wait_for(std::chrono::seconds(3)));
+    weak_ptr<MockSecureTunnelingContext> weakContext = context;
+    context->deferLifecycleTasks = true;
+    context.reset();
+    EXPECT_FALSE(weakContext.expired());
+    EXPECT_EQ(std::future_status::timeout, stoppedFuture.wait_for(std::chrono::seconds(0)));
+
+    auto callback = std::move(onStopped);
+    ASSERT_TRUE(static_cast<bool>(callback));
+    callback(nullptr);
+
+    EXPECT_EQ(std::future_status::ready, stoppedFuture.wait_for(std::chrono::seconds(0)));
+    EXPECT_FALSE(weakContext.expired());
+
+    auto retainedContext = weakContext.lock();
+    ASSERT_TRUE(static_cast<bool>(retainedContext));
+    retainedContext->RunNextLifecycleTask();
+    retainedContext.reset();
+
+    EXPECT_TRUE(weakContext.expired());
+}
+
+TEST_F(TestSecureTunnelContext, StopDuringConnectIsQueuedAfterConnect)
+{
+    auto connectEntered = make_shared<promise<void>>();
+    auto connectEnteredFuture = connectEntered->get_future();
+    auto allowConnect = make_shared<promise<void>>();
+    auto allowConnectFuture = allowConnect->get_future().share();
+    atomic<bool> closeCalled{false};
+    promise<bool> connectResult;
+    auto connectResultFuture = connectResult.get_future();
+
+    context = make_shared<MockSecureTunnelingContext>(manager, rootCa, accessToken, endpoint, port, nullptr);
+    EXPECT_CALL(*context, CreateSecureTunnel(_, _, _, _, _, _, _, _))
+        .WillOnce(DoAll(SaveArg<7>(&onStopped), Return(tunnel)));
+    EXPECT_CALL(*tunnel, Connect())
+        .WillOnce(InvokeWithoutArgs([&]() {
+            connectEntered->set_value();
+            allowConnectFuture.wait();
+            return AWS_OP_SUCCESS;
+        }));
+    EXPECT_CALL(*tunnel, Close())
+        .WillOnce(InvokeWithoutArgs([&]() {
+            closeCalled = true;
+            return AWS_OP_SUCCESS;
+        }));
+
+    thread connectThread([&]() { connectResult.set_value(context->ConnectToSecureTunnel()); });
+    if (future_status::ready != connectEnteredFuture.wait_for(chrono::seconds(3)))
+    {
+        allowConnect->set_value();
+        connectThread.join();
+        FAIL() << "Tunnel connection did not start";
+    }
+
+    context->StopSecureTunnel();
+    EXPECT_FALSE(closeCalled);
+
+    allowConnect->set_value();
+    connectThread.join();
+
+    EXPECT_TRUE(connectResultFuture.get());
+    EXPECT_TRUE(closeCalled);
+
+    weak_ptr<MockSecureTunnelingContext> weakContext = context;
+    context.reset();
+    EXPECT_FALSE(weakContext.expired());
+
+    auto callback = std::move(onStopped);
+    ASSERT_TRUE(static_cast<bool>(callback));
+    callback(nullptr);
+
+    EXPECT_TRUE(weakContext.expired());
+}
+
+TEST_F(TestSecureTunnelContext, StopDuringFailedConnectDoesNotRetainContext)
+{
+    auto connectEntered = make_shared<promise<void>>();
+    auto connectEnteredFuture = connectEntered->get_future();
+    auto allowConnect = make_shared<promise<void>>();
+    auto allowConnectFuture = allowConnect->get_future().share();
+    promise<bool> connectResult;
+    auto connectResultFuture = connectResult.get_future();
+
+    context = make_shared<MockSecureTunnelingContext>(manager, rootCa, accessToken, endpoint, port, nullptr);
+    EXPECT_CALL(*context, CreateSecureTunnel(_, _, _, _, _, _, _, _))
+        .WillOnce(DoAll(SaveArg<7>(&onStopped), Return(tunnel)));
+    EXPECT_CALL(*tunnel, Connect())
+        .WillOnce(InvokeWithoutArgs([&]() {
+            connectEntered->set_value();
+            allowConnectFuture.wait();
+            return AWS_OP_ERR;
+        }));
+    EXPECT_CALL(*tunnel, Close()).Times(0);
+
+    thread connectThread([&]() { connectResult.set_value(context->ConnectToSecureTunnel()); });
+    if (future_status::ready != connectEnteredFuture.wait_for(chrono::seconds(3)))
+    {
+        allowConnect->set_value();
+        connectThread.join();
+        FAIL() << "Tunnel connection did not start";
+    }
+
+    context->StopSecureTunnel();
+    allowConnect->set_value();
+    connectThread.join();
+
+    EXPECT_FALSE(connectResultFuture.get());
+    weak_ptr<MockSecureTunnelingContext> weakContext = context;
+    onStopped = nullptr;
+    context.reset();
+
+    EXPECT_TRUE(weakContext.expired());
+}
+
+TEST_F(TestSecureTunnelContext, StopQueueFailureIsRetried)
+{
+    context = make_shared<MockSecureTunnelingContext>(manager, rootCa, accessToken, endpoint, port, nullptr);
+    EXPECT_CALL(*context, CreateSecureTunnel(_, _, _, _, _, _, _, _))
+        .WillOnce(DoAll(SaveArg<7>(&onStopped), Return(tunnel)));
+    EXPECT_CALL(*tunnel, Connect()).WillOnce(Return(AWS_OP_SUCCESS));
+    EXPECT_CALL(*tunnel, Close())
+        .WillOnce(Return(AWS_OP_ERR))
+        .WillOnce(Return(AWS_OP_SUCCESS));
+
+    ASSERT_TRUE(context->ConnectToSecureTunnel());
+    context->deferLifecycleTasks = true;
+    context->StopSecureTunnel();
+    ASSERT_EQ(1u, context->scheduledLifecycleTasks.size());
+
+    context->RunNextLifecycleTask();
+    ASSERT_EQ(1u, context->scheduledLifecycleTasks.size());
+
+    context->RunNextLifecycleTask();
+    EXPECT_TRUE(context->scheduledLifecycleTasks.empty());
+
+    weak_ptr<MockSecureTunnelingContext> weakContext = context;
+    context.reset();
+    EXPECT_FALSE(weakContext.expired());
+
+    auto callback = std::move(onStopped);
+    ASSERT_TRUE(static_cast<bool>(callback));
+    callback(nullptr);
+
+    auto retainedContext = weakContext.lock();
+    ASSERT_TRUE(static_cast<bool>(retainedContext));
+    ASSERT_EQ(1u, retainedContext->scheduledLifecycleTasks.size());
+    retainedContext->RunNextLifecycleTask();
+    retainedContext.reset();
+
+    EXPECT_TRUE(weakContext.expired());
 }

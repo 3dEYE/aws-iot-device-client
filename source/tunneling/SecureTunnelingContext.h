@@ -9,6 +9,10 @@
 #include <aws/crt/Types.h>
 #include <aws/iotsecuretunneling/SecureTunnel.h>
 #include <aws/iotsecuretunneling/SecureTunnelingNotifyResponse.h>
+#include <chrono>
+#include <functional>
+#include <memory>
+#include <mutex>
 #include <string>
 
 namespace Aws
@@ -20,13 +24,13 @@ namespace Aws
             namespace SecureTunneling
             {
                 class SecureTunnelingContext;
-                using OnConnectionShutdownFn = std::function<void(SecureTunnelingContext *)>;
+                using OnStoppedFn = std::function<void(SecureTunnelingContext *)>;
 
                 /**
                  * \brief A class that represents a secure tunnel and local TCP port forward pair. The class also
                  * implements all the callbacks required for secure tunneling and local TCP port forward.
                  */
-                class SecureTunnelingContext
+                class SecureTunnelingContext : public std::enable_shared_from_this<SecureTunnelingContext>
                 {
                   public:
                     /**
@@ -37,7 +41,7 @@ namespace Aws
                      * @param accessToken destination access token for connecting to a secure tunnel
                      * @param endpoint secure tunneling data plain endpoint
                      * @param port the local TCP port to connect to
-                     * @param onConnectionShutdown callback when the secure tunnel is shutdown
+                     * @param onStopped callback when the secure tunnel is fully stopped
                      */
                     SecureTunnelingContext(
                         std::shared_ptr<SharedCrtResourceManager> manager,
@@ -45,7 +49,7 @@ namespace Aws
                         const std::string &accessToken,
                         const std::string &endpoint,
                         const int port,
-                        const OnConnectionShutdownFn &onConnectionShutdown);
+                        const OnStoppedFn &onStopped);
 
                     SecureTunnelingContext(
                         std::shared_ptr<SharedCrtResourceManager> manager,
@@ -54,7 +58,7 @@ namespace Aws
                         const std::string &accessToken,
                         const std::string &endpoint,
                         const int port,
-                        const OnConnectionShutdownFn &onConnectionShutdown);
+                        const OnStoppedFn &onStopped);
 
                     /**
                      * \brief Constructor
@@ -114,7 +118,15 @@ namespace Aws
                         const Aws::Iotsecuretunneling::OnDataReceive &onDataReceive,
                         const Aws::Iotsecuretunneling::OnStreamStart &onStreamStart,
                         const Aws::Iotsecuretunneling::OnStreamReset &onStreamReset,
-                        const Aws::Iotsecuretunneling::OnSessionReset &onSessionReset);
+                        const Aws::Iotsecuretunneling::OnSessionReset &onSessionReset,
+                        const Aws::Iotsecuretunneling::OnStopped &onStopped);
+
+                    /**
+                     * \brief Schedule lifecycle work for a later event-loop turn
+                     */
+                    virtual bool ScheduleLifecycleTask(
+                        std::function<void()> task,
+                        std::chrono::milliseconds delay);
 
                     /**
                      * \brief Create a Tcp Forward instance
@@ -131,6 +143,11 @@ namespace Aws
                      */
                     virtual void DisconnectFromTcpForward();
 
+                    /**
+                     * \brief Stop and release the local TCP forward
+                     */
+                    void StopTcpForward();
+
                     //
                     // Secure tunneling protocol client callbacks
                     //
@@ -139,11 +156,6 @@ namespace Aws
                      * \brief Callback when secure tunnel connection is complete
                      */
                     void OnConnectionComplete() const;
-
-                    /**
-                     * \brief Callback when secure tunnel connection is shutdown
-                     */
-                    void OnConnectionShutdown();
 
                     /**
                      * \brief Callback when data send to secure tunnel is complete
@@ -173,6 +185,26 @@ namespace Aws
                      * \brief Callback when secure tunnel session_reset is received
                      */
                     void OnSessionReset();
+
+                    /**
+                     * \brief Callback when the secure tunnel reaches its fully stopped state
+                     */
+                    void OnStopped(Aws::Iotsecuretunneling::SecureTunnel *secureTunnel);
+
+                    /**
+                     * \brief Queue the SDK stop request after any just-queued start transition
+                     */
+                    void QueueStop();
+
+                    /**
+                     * \brief Schedule an SDK stop request
+                     */
+                    void ScheduleStop(std::chrono::milliseconds delay);
+
+                    /**
+                     * \brief Release callback-owned resources after the SDK OnStopped callback returns
+                     */
+                    void ReleaseAfterStopped();
                     //
                     // Member variables
                     //
@@ -213,9 +245,44 @@ namespace Aws
                     uint16_t mPort{22};
 
                     /**
-                     * \brief Callback when the secure tunnel is shutdown
+                     * \brief Callback when the secure tunnel is fully stopped
                      */
-                    OnConnectionShutdownFn mOnConnectionShutdown;
+                    OnStoppedFn mOnStopped;
+
+                    /**
+                     * \brief Protects terminal tunnel state and the self-retained lifetime
+                     */
+                    std::mutex mLifecycleLock;
+
+                    /**
+                     * \brief Keeps this context alive while the SDK can invoke callbacks that capture this
+                     */
+                    std::shared_ptr<SecureTunnelingContext> mLifetimeKeepAlive;
+
+                    /**
+                     * \brief True once tunnel shutdown has been requested
+                     */
+                    bool mStopRequested{false};
+
+                    /**
+                     * \brief True while the SDK start request is being queued
+                     */
+                    bool mConnectInProgress{false};
+
+                    /**
+                     * \brief True once a stop request has been queued with the SDK
+                     */
+                    bool mStopQueued{false};
+
+                    /**
+                     * \brief True while a deferred stop task is pending
+                     */
+                    bool mStopTaskScheduled{false};
+
+                    /**
+                     * \brief True once the SDK reports its terminal stopped state
+                     */
+                    bool mStopped{false};
 
                     /**
                      * \brief Wrapper around an AWS IoT SDK Secure Tunnel object. It manages the secure tunnel.
