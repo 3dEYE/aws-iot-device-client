@@ -111,7 +111,7 @@ case $compileMode in
       # Set CMake flags for ST mode
       cmake -DCMAKE_BUILD_TYPE=RELEASE -DCMAKE_TOOLCHAIN_FILE=../cmake-toolchain/Toolchain-armhf.cmake -DBUILD_SDK=ON -DEXCLUDE_JOBS=ON -DEXCLUDE_DD=ON -DEXCLUDE_FP=ON -DDISABLE_MQTT=ON -DEXCLUDE_SENSOR_PUBLISH=ON ../
     else
-      cmake -DCMAKE_TOOLCHAIN_FILE=../cmake-toolchain/Toolchain-armhf.cmake ../
+      cmake -DCMAKE_BUILD_TYPE=Release -DCMAKE_TOOLCHAIN_FILE=../cmake-toolchain/Toolchain-armhf.cmake ../
     fi
     cmake --build . --target aws-iot-device-client
     cmake --build . --target test-aws-iot-device-client
@@ -164,7 +164,7 @@ case $compileMode in
       # Set CMake flags for ST mode
       cmake -DCMAKE_BUILD_TYPE=MinSizeRel -DCMAKE_TOOLCHAIN_FILE=../cmake-toolchain/Toolchain-aarch64.cmake -DBUILD_SDK=ON -DEXCLUDE_JOBS=ON -DEXCLUDE_DD=ON -DEXCLUDE_FP=ON -DDISABLE_MQTT=ON -DEXCLUDE_SENSOR_PUBLISH=ON ../
     else
-      cmake -DCMAKE_TOOLCHAIN_FILE=../cmake-toolchain/Toolchain-aarch64.cmake ../
+      cmake -DCMAKE_BUILD_TYPE=Release -DCMAKE_TOOLCHAIN_FILE=../cmake-toolchain/Toolchain-aarch64.cmake ../
     fi
     cmake --build . --target aws-iot-device-client
     cmake --build . --target test-aws-iot-device-client
@@ -219,7 +219,7 @@ case $compileMode in
     exit $?
     ;;
     *)
-      cmake ../ -DBUILD_SDK=OFF -DBUILD_TEST_DEPS=OFF -DLINK_DL=ON
+      cmake ../ -DCMAKE_BUILD_TYPE=Release -DBUILD_SDK=OFF -DBUILD_TEST_DEPS=OFF -DLINK_DL=ON
     ;;
 esac
 

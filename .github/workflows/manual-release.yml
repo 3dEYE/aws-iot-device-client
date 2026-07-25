@@ -1,0 +1,167 @@
+name: Manual Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_branch:
+        description: Optional branch override; blank uses the branch selected in Run workflow
+        required: false
+        default: ""
+      dry_run:
+        description: Build binaries without creating a GitHub release
+        required: true
+        default: "true"
+        type: choice
+        options:
+          - "true"
+          - "false"
+
+permissions:
+  contents: read
+
+env:
+  PACKAGE_NAME: aws-iot-device-client
+  LOCAL_BUILD_IMAGE: aws-iot-device-client-release-builder:local
+  SOURCE_REF: ${{ inputs.release_branch || github.ref_name }}
+
+jobs:
+  version:
+    name: Read release version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      sha: ${{ steps.revision.outputs.sha }}
+    steps:
+      - name: Checkout release branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.SOURCE_REF }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Record release revision
+        id: revision
+        shell: bash
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Generate version from release revision
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cmake \
+            -DPROJECT_NAME="$PACKAGE_NAME" \
+            -DGIT_VERSION=ON \
+            -DGIT_EXECUTABLE="$(command -v git)" \
+            -P CMakeLists.txt.versioning
+
+          if [[ ! -s .version ]]; then
+            echo ".version was not generated" >&2
+            exit 1
+          fi
+
+          version=$(cut -d'*' -f1 .version | tr -d '[:space:]')
+          if [[ -z "$version" ]]; then
+            echo "Unable to read release version from .version" >&2
+            exit 1
+          fi
+
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: Build ${{ matrix.architecture }} binary
+    runs-on: ubuntu-latest
+    needs: version
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - architecture: x64
+            build_args: ""
+            binary_path: build/aws-iot-device-client
+            asset_name: aws-iot-device-client-linux-x64
+          - architecture: arm32
+            build_args: --compile-mode=armhf_cross_mode
+            binary_path: build/aws-iot-device-client
+            asset_name: aws-iot-device-client-linux-arm32
+          - architecture: arm64
+            build_args: --compile-mode=aarch64_cross_mode
+            binary_path: build/aws-iot-device-client
+            asset_name: aws-iot-device-client-linux-arm64
+    steps:
+      - name: Checkout release revision
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.version.outputs.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Build binary
+        env:
+          RELEASE_BRANCH: ${{ env.SOURCE_REF }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          docker build \
+            --file .github/docker-images/base-images/device-client/ubuntu/Dockerfile \
+            --target base \
+            --tag "$LOCAL_BUILD_IMAGE" \
+            .
+          docker run \
+            --mount "type=bind,source=$(pwd),target=/root/${PACKAGE_NAME}" \
+            --env GITHUB_REF=refs/heads/${RELEASE_BRANCH} \
+            "$LOCAL_BUILD_IMAGE" \
+            ${{ matrix.build_args }}
+
+      - name: Stage release asset
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p release-assets
+          install -m 0755 "${{ matrix.binary_path }}" "release-assets/${{ matrix.asset_name }}"
+
+      - name: Upload release asset artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset_name }}
+          path: release-assets/${{ matrix.asset_name }}
+          if-no-files-found: error
+
+  release:
+    name: Create GitHub release
+    runs-on: ubuntu-latest
+    if: ${{ inputs.dry_run == 'false' }}
+    permissions:
+      contents: write
+    needs:
+      - version
+      - build
+    steps:
+      - name: Download release assets
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
+
+      - name: Create release and attach binaries
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_BRANCH: ${{ env.SOURCE_REF }}
+          VERSION: ${{ needs.version.outputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ "$RELEASE_BRANCH" != "dev" ]]; then
+            echo "Releases may only be created from the dev branch; use dry_run for other branches." >&2
+            exit 1
+          fi
+
+          gh release create "$VERSION" \
+            release-assets/* \
+            --target "${{ needs.version.outputs.sha }}" \
+            --title "$VERSION" \
+            --notes "Release built from the ${RELEASE_BRANCH} branch."
