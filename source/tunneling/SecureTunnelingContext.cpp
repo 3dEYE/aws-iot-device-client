@@ -5,10 +5,31 @@
 #include "../logging/LoggerFactory.h"
 #include "SecureTunnelingFeature.h"
 #include <aws/iotsecuretunneling/SecureTunnel.h>
+#include <aws/io/event_loop.h>
 
 using namespace std;
 using namespace Aws::Iotsecuretunneling;
 using namespace Aws::Iot::DeviceClient::Logging;
+
+namespace
+{
+    struct SecureTunnelingLifecycleTask
+    {
+        aws_task task;
+        std::function<void()> callback;
+    };
+
+    void RunSecureTunnelingLifecycleTask(aws_task *task, void *arg, enum aws_task_status status)
+    {
+        (void)task;
+        unique_ptr<SecureTunnelingLifecycleTask> lifecycleTask(
+            static_cast<SecureTunnelingLifecycleTask *>(arg));
+        if (status == AWS_TASK_STATUS_RUN_READY)
+        {
+            lifecycleTask->callback();
+        }
+    }
+} // namespace
 
 namespace Aws
 {
@@ -26,10 +47,9 @@ namespace Aws
                     const string &accessToken,
                     const string &endpoint,
                     const int port,
-                    const OnConnectionShutdownFn &onConnectionShutdown)
+                    const OnStoppedFn &onStopped)
                     : mSharedCrtResourceManager(manager), mRootCa(rootCa.has_value() ? rootCa.value() : ""),
-                      mAccessToken(accessToken), mEndpoint(endpoint), mPort(port),
-                      mOnConnectionShutdown(onConnectionShutdown)
+                      mAccessToken(accessToken), mEndpoint(endpoint), mPort(port), mOnStopped(onStopped)
                 {
                 }
 
@@ -40,20 +60,14 @@ namespace Aws
                     const string &accessToken,
                     const string &endpoint,
                     const int port,
-                    const OnConnectionShutdownFn &onConnectionShutdown)
+                    const OnStoppedFn &onStopped)
                     : mSharedCrtResourceManager(manager), mProxyOptions(proxyOptions),
                       mRootCa(rootCa.has_value() ? rootCa.value() : ""), mAccessToken(accessToken), mEndpoint(endpoint),
-                      mPort(port), mOnConnectionShutdown(onConnectionShutdown)
+                      mPort(port), mOnStopped(onStopped)
                 {
                 }
 
-                SecureTunnelingContext::~SecureTunnelingContext()
-                {
-                    if (mSecureTunnel && mSecureTunnel->IsValid())
-                    {
-                        mSecureTunnel->Close();
-                    }
-                }
+                SecureTunnelingContext::~SecureTunnelingContext() = default;
 
                 template <typename T>
                 static bool operator==(const Aws::Crt::Optional<T> &lhs, const Aws::Crt::Optional<T> &rhs)
@@ -106,20 +120,61 @@ namespace Aws
                         return false;
                     }
 
-                    mSecureTunnel = CreateSecureTunnel(
+                    auto secureTunnel = CreateSecureTunnel(
                         bind(&SecureTunnelingContext::OnConnectionComplete, this),
-                        bind(&SecureTunnelingContext::OnConnectionShutdown, this),
+                        nullptr,
                         bind(&SecureTunnelingContext::OnSendDataComplete, this, placeholders::_1),
                         bind(&SecureTunnelingContext::OnDataReceive, this, placeholders::_1),
                         bind(&SecureTunnelingContext::OnStreamStart, this),
                         bind(&SecureTunnelingContext::OnStreamReset, this),
-                        bind(&SecureTunnelingContext::OnSessionReset, this));
+                        bind(&SecureTunnelingContext::OnSessionReset, this),
+                        bind(&SecureTunnelingContext::OnStopped, this, placeholders::_1));
 
-                    bool connectionSuccess = mSecureTunnel->Connect() == AWS_OP_SUCCESS;
+                    if (!secureTunnel || !secureTunnel->IsValid())
+                    {
+                        LOG_ERROR(TAG, "Cannot create secure tunnel. Please see the SDK log for detail.");
+                        return false;
+                    }
+
+                    {
+                        lock_guard<mutex> lock(mLifecycleLock);
+                        if (mStopRequested)
+                        {
+                            return false;
+                        }
+                        mSecureTunnel = secureTunnel;
+                        mConnectInProgress = true;
+                    }
+
+                    bool connectionSuccess = secureTunnel->Connect() == AWS_OP_SUCCESS;
+                    bool stopAfterConnect = false;
+                    shared_ptr<SecureTunnelingContext> failedConnectKeepAlive;
+
+                    {
+                        lock_guard<mutex> lock(mLifecycleLock);
+                        mConnectInProgress = false;
+                        if (!connectionSuccess)
+                        {
+                            mSecureTunnel.reset();
+                            if (mStopRequested)
+                            {
+                                mStopped = true;
+                                failedConnectKeepAlive = std::move(mLifetimeKeepAlive);
+                            }
+                        }
+                        else if (mStopRequested)
+                        {
+                            stopAfterConnect = true;
+                        }
+                    }
 
                     if (!connectionSuccess)
                     {
                         LOG_ERROR(TAG, "Cannot connect to secure tunnel. Please see the SDK log for detail.");
+                    }
+                    else if (stopAfterConnect)
+                    {
+                        StopSecureTunnel();
                     }
 
                     return connectionSuccess;
@@ -133,22 +188,36 @@ namespace Aws
                         return;
                     }
 
-                    mTcpForward = CreateTcpForward();
+                    StopTcpForward();
+                    auto tcpForward = CreateTcpForward();
+                    if (!tcpForward)
+                    {
+                        LOG_ERROR(TAG, "Cannot create local TCP forward.");
+                        return;
+                    }
 
-                    mTcpForward->Connect();
+                    mTcpForward = tcpForward;
+                    if (tcpForward->Connect() != AWS_OP_SUCCESS)
+                    {
+                        LOG_ERROR(TAG, "Cannot connect to local TCP port.");
+                        StopTcpForward();
+                    }
                 }
 
-                void SecureTunnelingContext::DisconnectFromTcpForward() { mTcpForward.reset(); }
+                void SecureTunnelingContext::DisconnectFromTcpForward() { StopTcpForward(); }
+
+                void SecureTunnelingContext::StopTcpForward()
+                {
+                    auto tcpForward = std::move(mTcpForward);
+                    if (tcpForward)
+                    {
+                        tcpForward->Stop();
+                    }
+                }
 
                 void SecureTunnelingContext::OnConnectionComplete() const
                 {
                     LOG_DEBUG(TAG, "SecureTunnelingContext::OnConnectionComplete");
-                }
-
-                void SecureTunnelingContext::OnConnectionShutdown()
-                {
-                    LOG_DEBUG(TAG, "SecureTunnelingContext::OnConnectionShutdown");
-                    mOnConnectionShutdown(this);
                 }
 
                 void SecureTunnelingContext::OnSendDataComplete(int errorCode) const
@@ -163,7 +232,11 @@ namespace Aws
                 void SecureTunnelingContext::OnDataReceive(const Crt::ByteBuf &data) const
                 {
                     LOGM_TRACE(TAG, "SecureTunnelingContext::OnDataReceive data.len=%zu", data.len);
-                    mTcpForward->SendData(aws_byte_cursor_from_buf(&data));
+                    auto tcpForward = mTcpForward;
+                    if (tcpForward)
+                    {
+                        tcpForward->SendData(aws_byte_cursor_from_buf(&data));
+                    }
                 }
 
                 void SecureTunnelingContext::OnStreamStart()
@@ -184,6 +257,41 @@ namespace Aws
                     DisconnectFromTcpForward();
                 }
 
+                void SecureTunnelingContext::OnStopped(Aws::Iotsecuretunneling::SecureTunnel *secureTunnel)
+                {
+                    (void)secureTunnel;
+                    LOG_DEBUG(TAG, "SecureTunnelingContext::OnStopped");
+
+                    OnStoppedFn onStopped;
+                    shared_ptr<SecureTunnelingContext> self;
+                    {
+                        lock_guard<mutex> lock(mLifecycleLock);
+                        if (mStopped)
+                        {
+                            return;
+                        }
+                        mStopped = true;
+                        if (!mLifetimeKeepAlive)
+                        {
+                            mLifetimeKeepAlive = shared_from_this();
+                        }
+                        onStopped = mOnStopped;
+                        self = mLifetimeKeepAlive;
+                    }
+
+                    if (onStopped)
+                    {
+                        onStopped(this);
+                    }
+
+                    bool releaseScheduled =
+                        ScheduleLifecycleTask([self]() { self->ReleaseAfterStopped(); }, chrono::milliseconds(0));
+                    if (!releaseScheduled)
+                    {
+                        LOG_ERROR(TAG, "Cannot schedule secure tunnel cleanup; retaining context for callback safety.");
+                    }
+                }
+
                 void SecureTunnelingContext::OnTcpForwardDataReceive(const Crt::ByteBuf &data) const
                 {
                     LOGM_TRACE(TAG, "SecureTunnelingContext::OnTcpForwardDataReceive data.len=%zu", data.len);
@@ -193,7 +301,79 @@ namespace Aws
                 void SecureTunnelingContext::StopSecureTunnel()
                 {
                     LOG_DEBUG(TAG, "SecureTunnelingContext::StopSecureTunnel");
-                    mSecureTunnel->Shutdown();
+
+                    {
+                        lock_guard<mutex> lock(mLifecycleLock);
+                        mStopRequested = true;
+                        if (mSecureTunnel && !mLifetimeKeepAlive)
+                        {
+                            mLifetimeKeepAlive = shared_from_this();
+                        }
+                        if (
+                            mConnectInProgress || mStopQueued || mStopTaskScheduled || mStopped || !mSecureTunnel)
+                        {
+                            return;
+                        }
+                    }
+
+                    ScheduleStop(chrono::milliseconds(0));
+                }
+
+                void SecureTunnelingContext::ScheduleStop(chrono::milliseconds delay)
+                {
+                    shared_ptr<SecureTunnelingContext> self;
+                    {
+                        lock_guard<mutex> lock(mLifecycleLock);
+                        if (
+                            mConnectInProgress || mStopQueued || mStopTaskScheduled || mStopped || !mSecureTunnel)
+                        {
+                            return;
+                        }
+
+                        mStopTaskScheduled = true;
+                        self = mLifetimeKeepAlive;
+                    }
+
+                    if (!ScheduleLifecycleTask([self]() { self->QueueStop(); }, delay))
+                    {
+                        lock_guard<mutex> lock(mLifecycleLock);
+                        mStopTaskScheduled = false;
+                        LOG_ERROR(TAG, "Cannot schedule secure tunnel stop; retaining context for callback safety.");
+                    }
+                }
+
+                void SecureTunnelingContext::QueueStop()
+                {
+                    shared_ptr<SecureTunnelWrapper> secureTunnel;
+                    {
+                        lock_guard<mutex> lock(mLifecycleLock);
+                        mStopTaskScheduled = false;
+                        if (mStopQueued || mStopped || !mSecureTunnel)
+                        {
+                            return;
+                        }
+
+                        mStopQueued = true;
+                        secureTunnel = mSecureTunnel;
+                    }
+
+                    if (secureTunnel->Close() != AWS_OP_SUCCESS)
+                    {
+                        LOG_ERROR(TAG, "Cannot stop secure tunnel. Please see the SDK log for detail.");
+                        {
+                            lock_guard<mutex> lock(mLifecycleLock);
+                            mStopQueued = false;
+                        }
+                        ScheduleStop(chrono::seconds(1));
+                    }
+                }
+
+                void SecureTunnelingContext::ReleaseAfterStopped()
+                {
+                    StopTcpForward();
+                    lock_guard<mutex> lock(mLifecycleLock);
+                    mSecureTunnel.reset();
+                    mLifetimeKeepAlive.reset();
                 }
 
                 std::shared_ptr<SecureTunnelWrapper> SecureTunnelingContext::CreateSecureTunnel(
@@ -203,7 +383,8 @@ namespace Aws
                     const Aws::Iotsecuretunneling::OnDataReceive &onDataReceive,
                     const Aws::Iotsecuretunneling::OnStreamStart &onStreamStart,
                     const Aws::Iotsecuretunneling::OnStreamReset &onStreamReset,
-                    const Aws::Iotsecuretunneling::OnSessionReset &onSessionReset)
+                    const Aws::Iotsecuretunneling::OnSessionReset &onSessionReset,
+                    const Aws::Iotsecuretunneling::OnStopped &onStopped)
                 {
                     if (mProxyOptions.HostName.length() > 0)
                     {
@@ -218,12 +399,13 @@ namespace Aws
                             mEndpoint,
                             mRootCa,
                             onConnectionComplete,
-                            nullptr, // TODO: long term fix needed for onConnectionShutdown callback
+                            onConnectionShutdown,
                             onSendDataComplete,
                             onDataReceive,
                             onStreamStart,
                             onStreamReset,
-                            onSessionReset);
+                            onSessionReset,
+                            onStopped);
                     }
                     else
                     {
@@ -236,21 +418,69 @@ namespace Aws
                             mEndpoint,
                             mRootCa,
                             onConnectionComplete,
-                            nullptr, // TODO: long term fix needed for onConnectionShutdown callback
+                            onConnectionShutdown,
                             onSendDataComplete,
                             onDataReceive,
                             onStreamStart,
                             onStreamReset,
-                            onSessionReset);
+                            onSessionReset,
+                            onStopped);
                     }
+                }
+
+                bool SecureTunnelingContext::ScheduleLifecycleTask(
+                    std::function<void()> task,
+                    std::chrono::milliseconds delay)
+                {
+                    if (!mSharedCrtResourceManager)
+                    {
+                        return false;
+                    }
+
+                    aws_event_loop *eventLoop = mSharedCrtResourceManager->getNextEventLoop();
+                    if (!eventLoop)
+                    {
+                        return false;
+                    }
+
+                    unique_ptr<SecureTunnelingLifecycleTask> lifecycleTask(new SecureTunnelingLifecycleTask());
+                    lifecycleTask->callback = std::move(task);
+                    aws_task_init(
+                        &lifecycleTask->task,
+                        RunSecureTunnelingLifecycleTask,
+                        lifecycleTask.get(),
+                        "secure_tunneling_lifecycle");
+                    if (delay.count() > 0)
+                    {
+                        uint64_t runAtNanos;
+                        if (aws_event_loop_current_clock_time(eventLoop, &runAtNanos) != AWS_OP_SUCCESS)
+                        {
+                            return false;
+                        }
+                        runAtNanos += chrono::duration_cast<chrono::nanoseconds>(delay).count();
+                        aws_event_loop_schedule_task_future(eventLoop, &lifecycleTask->task, runAtNanos);
+                    }
+                    else
+                    {
+                        aws_event_loop_schedule_task_now(eventLoop, &lifecycleTask->task);
+                    }
+                    lifecycleTask.release();
+                    return true;
                 }
 
                 std::shared_ptr<TcpForward> SecureTunnelingContext::CreateTcpForward()
                 {
+                    weak_ptr<SecureTunnelingContext> weakSelf = shared_from_this();
                     return std::make_shared<TcpForward>(
                         mSharedCrtResourceManager,
                         mPort,
-                        bind(&SecureTunnelingContext::OnTcpForwardDataReceive, this, placeholders::_1));
+                        [weakSelf](const Crt::ByteBuf &data) {
+                            auto self = weakSelf.lock();
+                            if (self)
+                            {
+                                self->OnTcpForwardDataReceive(data);
+                            }
+                        });
                 }
             } // namespace SecureTunneling
         }     // namespace DeviceClient

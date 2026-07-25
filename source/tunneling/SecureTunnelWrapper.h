@@ -37,7 +37,8 @@ namespace Aws
                         const Aws::Iotsecuretunneling::OnDataReceive &onDataReceive,
                         const Aws::Iotsecuretunneling::OnStreamStart &onStreamStart,
                         const Aws::Iotsecuretunneling::OnStreamReset &onStreamReset,
-                        const Aws::Iotsecuretunneling::OnSessionReset &onSessionReset);
+                        const Aws::Iotsecuretunneling::OnSessionReset &onSessionReset,
+                        const Aws::Iotsecuretunneling::OnStopped &onStopped);
 
                     // With HTTP Proxy
                     SecureTunnelWrapper(
@@ -57,7 +58,8 @@ namespace Aws
                         const Aws::Iotsecuretunneling::OnDataReceive &onDataReceive,
                         const Aws::Iotsecuretunneling::OnStreamStart &onStreamStart,
                         const Aws::Iotsecuretunneling::OnStreamReset &onStreamReset,
-                        const Aws::Iotsecuretunneling::OnSessionReset &onSessionReset);
+                        const Aws::Iotsecuretunneling::OnSessionReset &onSessionReset,
+                        const Aws::Iotsecuretunneling::OnStopped &onStopped);
 
                     virtual int Connect();
 

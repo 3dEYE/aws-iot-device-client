@@ -102,12 +102,56 @@ class BlockingSecureTunnelContext : public SecureTunnelingContext
     shared_ptr<BlockingSecureTunnelContextState> state;
 };
 
+struct RetainedBlockingSecureTunnelContextState
+{
+    shared_ptr<promise<void>> connectEntered;
+    shared_future<void> allowConnect;
+    shared_ptr<promise<void>> stopRequested;
+    shared_ptr<promise<void>> destroyed;
+    std::function<void()> completeStop;
+};
+
+class RetainedBlockingSecureTunnelContext : public SecureTunnelingContext
+{
+  public:
+    explicit RetainedBlockingSecureTunnelContext(
+        const shared_ptr<RetainedBlockingSecureTunnelContextState> &state)
+        : state(state)
+    {
+    }
+
+    ~RetainedBlockingSecureTunnelContext() override { state->destroyed->set_value(); }
+
+    bool ConnectToSecureTunnel() override
+    {
+        lifetimeKeepAlive = shared_from_this();
+        weak_ptr<SecureTunnelingContext> weakSelf = lifetimeKeepAlive;
+        state->completeStop = [weakSelf]() {
+            auto self = weakSelf.lock();
+            if (self)
+            {
+                static_cast<RetainedBlockingSecureTunnelContext *>(self.get())->lifetimeKeepAlive.reset();
+            }
+        };
+        state->connectEntered->set_value();
+        state->allowConnect.wait();
+        return true;
+    }
+
+    void StopSecureTunnel() override { state->stopRequested->set_value(); }
+    bool IsDuplicateNotification(const SecureTunnelingNotifyResponse &) override { return false; }
+
+  private:
+    shared_ptr<RetainedBlockingSecureTunnelContextState> state;
+    shared_ptr<SecureTunnelingContext> lifetimeKeepAlive;
+};
+
 class MockSecureTunnelingFeature : public SecureTunnelingFeature
 {
   public:
     MockSecureTunnelingFeature() : SecureTunnelingFeature() {}
     MOCK_METHOD(
-        std::unique_ptr<SecureTunnelingContext>,
+        std::shared_ptr<SecureTunnelingContext>,
         createContext,
         (const std::string &accessToken, const std::string &region, const uint16_t &port),
         (override));
@@ -164,7 +208,7 @@ class TestSecureTunnelingFeature : public testing::Test
         secureTunnelingFeature = shared_ptr<MockSecureTunnelingFeature>(new MockSecureTunnelingFeature());
         mockClient = shared_ptr<MockIotSecureTunnelingClient>(new MockIotSecureTunnelingClient());
         notifier = shared_ptr<MockNotifier>(new MockNotifier());
-        fakeContext = unique_ptr<FakeSecureTunnelContext>(new FakeSecureTunnelContext());
+        fakeContext = make_shared<FakeSecureTunnelContext>();
         response = unique_ptr<SecureTunnelingNotifyResponse>(new SecureTunnelingNotifyResponse());
         config = getConfig();
     }
@@ -173,7 +217,7 @@ class TestSecureTunnelingFeature : public testing::Test
     shared_ptr<MockSecureTunnelingFeature> secureTunnelingFeature;
     shared_ptr<SharedCrtResourceManager> manager;
     shared_ptr<MockNotifier> notifier;
-    unique_ptr<FakeSecureTunnelContext> fakeContext;
+    shared_ptr<FakeSecureTunnelContext> fakeContext;
     unique_ptr<SecureTunnelingNotifyResponse> response;
     PlainConfig config;
 };
@@ -413,7 +457,7 @@ TEST_F(TestSecureTunnelingFeature, PreservedSessionAcceptsNotificationFromPendin
 
     EXPECT_CALL(*secureTunnelingFeature, createContext(StrEq(accessToken), StrEq(region), Eq(port)))
         .Times(1)
-        .WillOnce(DoAll(Assign(&contextCreated, true), Return(ByMove(std::move(fakeContext)))));
+        .WillOnce(DoAll(Assign(&contextCreated, true), Return(fakeContext)));
     EXPECT_CALL(*secureTunnelingFeature, createClient()).Times(1).WillOnce(Return(mockClient));
     EXPECT_CALL(*mockClient, SubscribeToTunnelsNotify(ThingNameEq(thingName), AWS_MQTT_QOS_AT_LEAST_ONCE, _, _))
         .Times(3)
@@ -595,7 +639,7 @@ TEST_F(TestSecureTunnelingFeature, SessionRecoveryPreservesTunnelConnectionAlrea
     auto contextDestroyedFuture = contextDestroyed->get_future();
     auto contextState = make_shared<BlockingSecureTunnelContextState>(
         BlockingSecureTunnelContextState{connectEntered, allowConnectFuture, contextDestroyed});
-    unique_ptr<SecureTunnelingContext> blockingContext(new BlockingSecureTunnelContext(contextState));
+    shared_ptr<SecureTunnelingContext> blockingContext = make_shared<BlockingSecureTunnelContext>(contextState);
 
     Iotsecuretunneling::OnSubscribeToTunnelsNotifyResponse notificationHandler;
     promise<void> recoveryCompleted;
@@ -603,7 +647,7 @@ TEST_F(TestSecureTunnelingFeature, SessionRecoveryPreservesTunnelConnectionAlrea
 
     EXPECT_CALL(*secureTunnelingFeature, createContext(StrEq(accessToken), StrEq(region), Eq(port)))
         .Times(1)
-        .WillOnce(Return(ByMove(std::move(blockingContext))));
+        .WillOnce(Return(std::move(blockingContext)));
     EXPECT_CALL(*secureTunnelingFeature, createClient()).Times(1).WillOnce(Return(mockClient));
     EXPECT_CALL(*mockClient, SubscribeToTunnelsNotify(ThingNameEq(thingName), AWS_MQTT_QOS_AT_LEAST_ONCE, _, _))
         .Times(2)
@@ -651,7 +695,65 @@ TEST_F(TestSecureTunnelingFeature, SessionRecoveryPreservesTunnelConnectionAlrea
     EXPECT_EQ(future_status::ready, contextDestroyedFuture.wait_for(chrono::seconds(0)));
 }
 
-TEST_F(TestSecureTunnelingFeature, StopDoesNotWaitForTunnelConnectionAndDiscardsStaleContext)
+TEST_F(TestSecureTunnelingFeature, StopRetainsRegisteredContextUntilTerminalCompletion)
+{
+    string accessToken = "12345";
+    string region = "us-west-2";
+    uint16_t port = 22;
+    Aws::Crt::Vector<Aws::Crt::String> services;
+    services.push_back("SSH");
+
+    response->ClientMode = "destination";
+    response->Services = services;
+    response->ClientAccessToken = accessToken.c_str();
+    response->Region = region.c_str();
+
+    auto connectEntered = make_shared<promise<void>>();
+    auto allowConnect = make_shared<promise<void>>();
+    auto allowConnectFuture = allowConnect->get_future().share();
+    allowConnect->set_value();
+    auto stopRequested = make_shared<promise<void>>();
+    auto stopRequestedFuture = stopRequested->get_future();
+    auto contextDestroyed = make_shared<promise<void>>();
+    auto contextDestroyedFuture = contextDestroyed->get_future();
+    auto contextState = make_shared<RetainedBlockingSecureTunnelContextState>(
+        RetainedBlockingSecureTunnelContextState{
+            connectEntered, allowConnectFuture, stopRequested, contextDestroyed, nullptr});
+    shared_ptr<SecureTunnelingContext> context =
+        make_shared<RetainedBlockingSecureTunnelContext>(contextState);
+
+    Iotsecuretunneling::OnSubscribeToTunnelsNotifyResponse notificationHandler;
+    EXPECT_CALL(*secureTunnelingFeature, createContext(StrEq(accessToken), StrEq(region), Eq(port)))
+        .Times(1)
+        .WillOnce(Return(std::move(context)));
+    EXPECT_CALL(*secureTunnelingFeature, createClient()).Times(1).WillOnce(Return(mockClient));
+    EXPECT_CALL(*mockClient, SubscribeToTunnelsNotify(ThingNameEq(thingName), AWS_MQTT_QOS_AT_LEAST_ONCE, _, _))
+        .Times(1)
+        .WillOnce(DoAll(SaveArg<2>(&notificationHandler), InvokeArgument<3>(0), Return(true)));
+    EXPECT_CALL(*notifier, onEvent(secureTunnelingFeature.get(), ClientBaseEventNotification::FEATURE_STARTED))
+        .Times(1);
+    EXPECT_CALL(*notifier, onEvent(secureTunnelingFeature.get(), ClientBaseEventNotification::FEATURE_STOPPED))
+        .Times(1);
+
+    secureTunnelingFeature->init(manager, notifier, config);
+    secureTunnelingFeature->start();
+    ASSERT_TRUE(static_cast<bool>(notificationHandler));
+    notificationHandler(response.get(), 0);
+
+    weak_ptr<MockSecureTunnelingFeature> weakFeature = secureTunnelingFeature;
+    secureTunnelingFeature->stop();
+    EXPECT_EQ(future_status::ready, stopRequestedFuture.wait_for(chrono::seconds(0)));
+
+    secureTunnelingFeature.reset();
+    EXPECT_TRUE(weakFeature.expired());
+    EXPECT_EQ(future_status::timeout, contextDestroyedFuture.wait_for(chrono::seconds(0)));
+
+    ASSERT_TRUE(static_cast<bool>(contextState->completeStop));
+    contextState->completeStop();
+    EXPECT_EQ(future_status::ready, contextDestroyedFuture.wait_for(chrono::seconds(0)));
+}
+
+TEST_F(TestSecureTunnelingFeature, StopDoesNotWaitForTunnelConnectionAndRetainsStaleContextUntilStopped)
 {
     string accessToken = "12345";
     string region = "us-west-2";
@@ -668,11 +770,15 @@ TEST_F(TestSecureTunnelingFeature, StopDoesNotWaitForTunnelConnectionAndDiscards
     auto connectEnteredFuture = connectEntered->get_future();
     auto allowConnect = make_shared<promise<void>>();
     auto allowConnectFuture = allowConnect->get_future().share();
+    auto stopRequested = make_shared<promise<void>>();
+    auto stopRequestedFuture = stopRequested->get_future();
     auto contextDestroyed = make_shared<promise<void>>();
     auto contextDestroyedFuture = contextDestroyed->get_future();
-    auto contextState = make_shared<BlockingSecureTunnelContextState>(
-        BlockingSecureTunnelContextState{connectEntered, allowConnectFuture, contextDestroyed});
-    unique_ptr<SecureTunnelingContext> blockingContext(new BlockingSecureTunnelContext(contextState));
+    auto contextState = make_shared<RetainedBlockingSecureTunnelContextState>(
+        RetainedBlockingSecureTunnelContextState{
+            connectEntered, allowConnectFuture, stopRequested, contextDestroyed, nullptr});
+    shared_ptr<SecureTunnelingContext> blockingContext =
+        make_shared<RetainedBlockingSecureTunnelContext>(contextState);
 
     Iotsecuretunneling::OnSubscribeToTunnelsNotifyResponse notificationHandler;
     promise<void> stopCompleted;
@@ -680,7 +786,7 @@ TEST_F(TestSecureTunnelingFeature, StopDoesNotWaitForTunnelConnectionAndDiscards
 
     EXPECT_CALL(*secureTunnelingFeature, createContext(StrEq(accessToken), StrEq(region), Eq(port)))
         .Times(1)
-        .WillOnce(Return(ByMove(std::move(blockingContext))));
+        .WillOnce(Return(std::move(blockingContext)));
     EXPECT_CALL(*secureTunnelingFeature, createClient()).Times(1).WillOnce(Return(mockClient));
     EXPECT_CALL(*mockClient, SubscribeToTunnelsNotify(ThingNameEq(thingName), AWS_MQTT_QOS_AT_LEAST_ONCE, _, _))
         .Times(1)
@@ -701,6 +807,10 @@ TEST_F(TestSecureTunnelingFeature, StopDoesNotWaitForTunnelConnectionAndDiscards
         allowConnect->set_value();
         notificationThread.join();
         secureTunnelingFeature->stop();
+        if (contextState->completeStop)
+        {
+            contextState->completeStop();
+        }
         FAIL() << "Tunnel connection did not start";
     }
 
@@ -714,6 +824,10 @@ TEST_F(TestSecureTunnelingFeature, StopDoesNotWaitForTunnelConnectionAndDiscards
         allowConnect->set_value();
         notificationThread.join();
         stopThread.join();
+        if (contextState->completeStop)
+        {
+            contextState->completeStop();
+        }
         FAIL() << "Feature stop waited for the tunnel connection";
     }
     stopThread.join();
@@ -724,8 +838,13 @@ TEST_F(TestSecureTunnelingFeature, StopDoesNotWaitForTunnelConnectionAndDiscards
     allowConnect->set_value();
     notificationThread.join();
 
-    EXPECT_EQ(future_status::ready, contextDestroyedFuture.wait_for(chrono::seconds(0)));
+    EXPECT_EQ(future_status::ready, stopRequestedFuture.wait_for(chrono::seconds(0)));
+    EXPECT_EQ(future_status::timeout, contextDestroyedFuture.wait_for(chrono::seconds(0)));
     EXPECT_TRUE(weakFeature.expired());
+
+    ASSERT_TRUE(static_cast<bool>(contextState->completeStop));
+    contextState->completeStop();
+    EXPECT_EQ(future_status::ready, contextDestroyedFuture.wait_for(chrono::seconds(0)));
 }
 
 TEST_F(TestSecureTunnelingFeature, CleanSessionDoesNotSubscribeWhenTunnelNotificationsAreDisabled)
@@ -737,7 +856,7 @@ TEST_F(TestSecureTunnelingFeature, CleanSessionDoesNotSubscribeWhenTunnelNotific
 
     EXPECT_CALL(*secureTunnelingFeature, createContext(StrEq("access-token"), StrEq("us-west-2"), Eq(22)))
         .Times(1)
-        .WillOnce(Return(ByMove(std::move(fakeContext))));
+        .WillOnce(Return(fakeContext));
     EXPECT_CALL(*secureTunnelingFeature, createClient()).Times(0);
     EXPECT_CALL(*mockClient, SubscribeToTunnelsNotify(_, _, _, _)).Times(0);
     EXPECT_CALL(*notifier, onEvent(secureTunnelingFeature.get(), ClientBaseEventNotification::FEATURE_STARTED))
@@ -769,7 +888,7 @@ TEST_F(TestSecureTunnelingFeature, CreateSSHContextHappy)
 
     EXPECT_CALL(*secureTunnelingFeature, createContext(StrEq(accessToken), StrEq(region), Eq(port)))
         .Times(1)
-        .WillOnce(Return(ByMove(std::move(fakeContext))));
+        .WillOnce(Return(fakeContext));
     EXPECT_CALL(*secureTunnelingFeature, createClient()).Times(1).WillOnce(Return(mockClient));
     EXPECT_CALL(*mockClient, SubscribeToTunnelsNotify(ThingNameEq(thingName), AWS_MQTT_QOS_AT_LEAST_ONCE, _, _))
         .Times(1)
@@ -798,7 +917,7 @@ TEST_F(TestSecureTunnelingFeature, CreateVNCContextHappy)
 
     EXPECT_CALL(*secureTunnelingFeature, createContext(StrEq(accessToken), StrEq(region), Eq(port)))
         .Times(1)
-        .WillOnce(Return(ByMove(std::move(fakeContext))));
+        .WillOnce(Return(fakeContext));
     EXPECT_CALL(*secureTunnelingFeature, createClient()).Times(1).WillOnce(Return(mockClient));
     EXPECT_CALL(*mockClient, SubscribeToTunnelsNotify(ThingNameEq(thingName), AWS_MQTT_QOS_AT_LEAST_ONCE, _, _))
         .Times(1)
@@ -873,7 +992,7 @@ TEST_F(TestSecureTunnelingFeature, DuplicateResponse)
 
     EXPECT_CALL(*secureTunnelingFeature, createContext(StrEq(accessToken), StrEq(region), Eq(port)))
         .Times(1)
-        .WillOnce(Return(ByMove(std::move(fakeContext))));
+        .WillOnce(Return(fakeContext));
     EXPECT_CALL(*secureTunnelingFeature, createClient()).Times(1).WillOnce(Return(mockClient));
     EXPECT_CALL(*mockClient, SubscribeToTunnelsNotify(ThingNameEq(thingName), AWS_MQTT_QOS_AT_LEAST_ONCE, _, _))
         .Times(1)
