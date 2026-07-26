@@ -22,7 +22,7 @@ if [[ ! "$sdk_commit" =~ ^[0-9a-f]{40}$ ]]; then
     exit 1
 fi
 
-version_status="$(git status --short -- .version)"
+version_status="$(git -C "$repo_root" status --short -- .version)"
 if [[ -n "$version_status" ]]; then
     printf 'Refusing to overwrite a pre-existing .version change:\n%s\n' \
         "$version_status" >&2
