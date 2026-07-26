@@ -161,6 +161,7 @@ jobs:
           fi
 
           gh release create "$VERSION" \
+            --repo "$GITHUB_REPOSITORY" \
             release-assets/* \
             --target "${{ needs.version.outputs.sha }}" \
             --title "$VERSION" \
