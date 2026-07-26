@@ -9,6 +9,9 @@ compileModeArgument=$(echo "$1" | cut -c3-14)
 if [ "$compileModeArgument" = "compile-mode" ]; then
   compileModeTmp=$(echo "$1" | cut -d "=" -f2-)
   case $compileModeTmp in
+    native_bundled_sdk_mode)
+    compileMode="native_bundled_sdk_mode"
+    ;;
     st_component_mode)
     compileMode="st_component_mode"
     ;;
@@ -85,6 +88,10 @@ fi
 cd ./build/
 
 case $compileMode in
+    native_bundled_sdk_mode)
+    echo "Building natively with the bundled SDK"
+    cmake ../ -DCMAKE_BUILD_TYPE=Release -DBUILD_SDK=ON -DBUILD_TEST_DEPS=OFF -DLINK_DL=ON
+    ;;
     st_component_mode)
     echo "Building in ST component mode"
     cmake ../ -DCMAKE_BUILD_TYPE=MinSizeRel -DBUILD_SDK=ON -DBUILD_TEST_DEPS=OFF -DLINK_DL=ON -DEXCLUDE_JOBS=ON -DEXCLUDE_DD=ON -DEXCLUDE_FP=ON -DDISABLE_MQTT=ON -DEXCLUDE_SENSOR_PUBLISH=ON

@@ -78,7 +78,7 @@ jobs:
       matrix:
         include:
           - architecture: x64
-            build_args: ""
+            build_args: --compile-mode=native_bundled_sdk_mode
             binary_path: build/aws-iot-device-client
             asset_name: aws-iot-device-client-linux-x64
           - architecture: arm32
