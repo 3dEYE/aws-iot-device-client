@@ -33,7 +33,7 @@ jobs:
 
     steps:
       - name: Checkout source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           fetch-depth: 0
           persist-credentials: false
@@ -55,14 +55,14 @@ jobs:
 
       - name: Restore pinned SDK source
         id: sdk-cache
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: .ci-cache/aws-iot-device-sdk-cpp-v2
           key: aws-iot-device-sdk-source-v2-${{ steps.sdk-pin.outputs.commit }}
 
       - name: Checkout pinned SDK source
         if: steps.sdk-cache.outputs.cache-hit != 'true'
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           repository: aws/aws-iot-device-sdk-cpp-v2
           ref: ${{ steps.sdk-pin.outputs.commit }}
