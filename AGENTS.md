@@ -17,55 +17,73 @@
 - Restore `.version` before reporting final Git status, even after a failed
   build.
 
-## Native build and tests
+## Build environment
 
-Build the application and unit-test executable:
+- In Codex Cloud, use the preconfigured x64 `build` tree with the commands
+  below. Setup and maintenance configure, build, and test this tree while
+  internet access is available.
+- During the Codex Cloud agent phase, do not install packages, download or fetch
+  dependencies, clone repositories, use Docker, or manually reconfigure CMake.
+  The prepared `build` tree contains everything needed for offline builds and
+  tests. If it is missing or incompatible, report that setup or maintenance
+  must be rerun.
+- Local agents outside Codex Cloud require `pwsh` and Docker, regardless of the
+  host operating system. Do not invoke CMake directly on the host or use
+  handwritten Docker commands. Use the checked-in PowerShell entry point:
+
+  ```powershell
+  # Configure incrementally, build, and run the full x64 CI suite
+  pwsh .codex/local/local-ci.ps1
+
+  # Configure incrementally and build all x64 validation targets
+  pwsh .codex/local/local-ci.ps1 -Mode Build
+
+  # Rerun the existing x64 test binaries without rebuilding
+  pwsh .codex/local/local-ci.ps1 -Mode Test
+  ```
+
+- The local workflow uses `ghcr.io/openai/codex-universal:latest` without
+  installing packages. It stores the build tree, downloaded dependencies, and
+  ccache data in the persistent `aws-iot-device-client-build` Docker volume.
+- Do not remove that volume unless the user explicitly requests a clean rebuild
+  or an incompatible toolchain/image change requires reconfiguration.
+
+## Codex Cloud x64 build and tests
+
+Build all x64 validation targets from the repository root:
 
 ```bash
-cmake --build <build-dir> \
-  --target aws-iot-device-client test-aws-iot-device-client \
+CCACHE_DIR=build/ccache \
+cmake --build build \
+  --target \
+    aws-iot-device-client \
+    test-aws-iot-device-client \
+    aws-c-iot-tests \
+    EventstreamRpc-cpp-tests \
+    IotDeviceDefender-cpp-tests \
   --parallel 2
 ```
 
-Run the native unit tests:
+Run the complete x64 test suite:
 
 ```bash
 AWS_CRT_MEMORY_TRACING=1 \
-  <build-dir>/test/test-aws-iot-device-client --gtest_brief=1
+  build/test/test-aws-iot-device-client --gtest_brief=1
+
+ctest \
+  --test-dir build/aws-c-iot-tests \
+  --output-on-failure \
+  --parallel 2 \
+  --timeout 60 \
+  --no-tests=error
+
+ctest \
+  --test-dir build/aws-iot-device-sdk-cpp-v2-build \
+  --output-on-failure \
+  --parallel 2 \
+  --timeout 60 \
+  --no-tests=error
 ```
-
-## ARM cross-builds
-
-ARM32 means ARMv7 hard-float (`armhf`) in this repository. Build both the
-application and test executable:
-
-```bash
-cmake --build <armhf-build-dir> \
-  --target aws-iot-device-client test-aws-iot-device-client \
-  --parallel 2
-
-cmake --build <aarch64-build-dir> \
-  --target aws-iot-device-client test-aws-iot-device-client \
-  --parallel 2
-```
-
-Do not execute the cross-compiled test binaries on an x86-64 build host. Verify
-their architectures instead:
-
-```bash
-arm-linux-gnueabihf-readelf -h <armhf-build-dir>/aws-iot-device-client
-arm-linux-gnueabihf-readelf -h \
-  <armhf-build-dir>/test/test-aws-iot-device-client
-
-aarch64-linux-gnu-readelf -h <aarch64-build-dir>/aws-iot-device-client
-aarch64-linux-gnu-readelf -h \
-  <aarch64-build-dir>/test/test-aws-iot-device-client
-```
-
-Expected results:
-
-- ARMHF application and tests: `Class: ELF32`, `Machine: ARM`.
-- AArch64 application and tests: `Class: ELF64`, `Machine: AArch64`.
 
 Finish validation with:
 
