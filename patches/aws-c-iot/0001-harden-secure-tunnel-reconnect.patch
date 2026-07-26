@@ -1,0 +1,311 @@
+diff --git a/include/aws/iotdevice/private/secure_tunneling_impl.h b/include/aws/iotdevice/private/secure_tunneling_impl.h
+index 9367d63218f38a223162b6dfebb8522a22eb7bfc..7d6538cca2703a1ddf4358dde8762376ce904187 100644
+--- a/include/aws/iotdevice/private/secure_tunneling_impl.h
++++ b/include/aws/iotdevice/private/secure_tunneling_impl.h
+@@ -262,6 +262,11 @@ struct aws_secure_tunnel {
+      */
+     uint64_t next_reconnect_time_ns;
+ 
++    /*
++     * After this time, connection failures stop the secure tunnel instead of scheduling another reconnect.
++     */
++    uint64_t reconnect_expiration_time_ns;
++
+     /*
+      * How many consecutive reconnect failures have we experienced?
+      */
+diff --git a/source/secure_tunneling.c b/source/secure_tunneling.c
+index a70132bd27ca84a0d3c1eaf9b839beb9c8ccba50..f3614788a68155c9b1c2db0a7af9971ee0e8aa49 100644
+--- a/source/secure_tunneling.c
++++ b/source/secure_tunneling.c
+@@ -29,6 +29,7 @@
+ #define PAYLOAD_BYTE_LENGTH_PREFIX 2
+ #define MIN_RECONNECT_DELAY_MS 1000
+ #define MAX_RECONNECT_DELAY_MS 120000
++#define SECURE_TUNNEL_RECONNECT_LIFETIME_SECONDS (12 * 60 * 60)
+ #define PING_TASK_INTERVAL ((uint64_t)20 * 1000000000)
+ #define WEBSOCKET_HEADER_NAME_ACCESS_TOKEN "access-token"
+ #define WEBSOCKET_HEADER_NAME_CLIENT_TOKEN "client-token"
+@@ -1061,6 +1062,24 @@ static void s_secure_tunnel_shutdown_websocket(struct aws_secure_tunnel *secure_
+     s_change_current_state(secure_tunnel, AWS_STS_WEBSOCKET_SHUTDOWN);
+ }
+ 
++static bool s_stop_reconnecting_if_expired(struct aws_secure_tunnel *secure_tunnel) {
++    if (secure_tunnel->desired_state != AWS_STS_CONNECTED) {
++        return false;
++    }
++
++    uint64_t now = (*secure_tunnel->vtable->get_current_time_fn)();
++    if (now < secure_tunnel->reconnect_expiration_time_ns) {
++        return false;
++    }
++
++    AWS_LOGF_WARN(
++        AWS_LS_IOTDEVICE_SECURE_TUNNELING,
++        "id=%p: secure tunnel reconnect lifetime has expired; stopping without another connection attempt",
++        (void *)secure_tunnel);
++    secure_tunnel->desired_state = AWS_STS_STOPPED;
++    return true;
++}
++
+ /* Called by websocket when it's destroyed or manually on failed websocket creation */
+ static void s_on_websocket_shutdown(struct aws_websocket *websocket, int error_code, void *user_data) {
+     struct aws_secure_tunnel *secure_tunnel = user_data;
+@@ -1073,6 +1092,8 @@ static void s_on_websocket_shutdown(struct aws_websocket *websocket, int error_c
+         secure_tunnel->config->on_connection_shutdown(error_code, secure_tunnel->config->user_data);
+     }
+ 
++    s_stop_reconnecting_if_expired(secure_tunnel);
++
+     if (secure_tunnel->desired_state == AWS_STS_CONNECTED) {
+         s_change_current_state(secure_tunnel, AWS_STS_PENDING_RECONNECT);
+     } else {
+@@ -1091,6 +1112,16 @@ static void s_on_websocket_setup(const struct aws_websocket_on_connection_setup_
+     secure_tunnel->websocket = setup->websocket;
+ 
+     if (setup->error_code != AWS_OP_SUCCESS) {
++        if (setup->handshake_response_status != NULL && *setup->handshake_response_status >= 400 &&
++            *setup->handshake_response_status < 500 && secure_tunnel->desired_state == AWS_STS_CONNECTED) {
++            AWS_LOGF_WARN(
++                AWS_LS_IOTDEVICE_SECURE_TUNNELING,
++                "id=%p: WebSocket handshake rejected with HTTP status %d; stopping without retry",
++                (void *)secure_tunnel,
++                *setup->handshake_response_status);
++            secure_tunnel->desired_state = AWS_STS_STOPPED;
++        }
++
+         /* Report a failed WebSocket Upgrade attempt */
+         if (secure_tunnel->config->on_connection_complete) {
+             secure_tunnel->config->on_connection_complete(NULL, setup->error_code, secure_tunnel->config->user_data);
+@@ -1349,7 +1380,11 @@ static void s_change_current_state_to_connecting(struct aws_secure_tunnel *secur
+             error_code,
+             aws_error_debug_str(error_code));
+ 
+-        s_change_current_state(secure_tunnel, AWS_STS_PENDING_RECONNECT);
++        if (s_stop_reconnecting_if_expired(secure_tunnel)) {
++            s_change_current_state(secure_tunnel, AWS_STS_STOPPED);
++        } else {
++            s_change_current_state(secure_tunnel, AWS_STS_PENDING_RECONNECT);
++        }
+     }
+ }
+ 
+@@ -2439,6 +2474,8 @@ static void s_service_state_clean_disconnect(struct aws_secure_tunnel *secure_tu
+ }
+ 
+ static void s_service_state_pending_reconnect(struct aws_secure_tunnel *secure_tunnel, uint64_t now) {
++    s_stop_reconnecting_if_expired(secure_tunnel);
++
+     if (secure_tunnel->desired_state != AWS_STS_CONNECTED) {
+         s_change_current_state(secure_tunnel, AWS_STS_STOPPED);
+         return;
+@@ -2514,6 +2551,10 @@ struct aws_secure_tunnel *aws_secure_tunnel_new(
+ 
+     secure_tunnel->allocator = allocator;
+     secure_tunnel->vtable = &s_default_secure_tunnel_vtable;
++    secure_tunnel->reconnect_expiration_time_ns = aws_add_u64_saturating(
++        (*secure_tunnel->vtable->get_current_time_fn)(),
++        aws_timestamp_convert(
++            SECURE_TUNNEL_RECONNECT_LIFETIME_SECONDS, AWS_TIMESTAMP_SECS, AWS_TIMESTAMP_NANOS, NULL));
+ 
+     aws_ref_count_init(&secure_tunnel->ref_count, secure_tunnel, s_on_secure_tunnel_zero_ref_count);
+ 
+diff --git a/tests/CMakeLists.txt b/tests/CMakeLists.txt
+index 1e5d75476ea42a8bb902894e0ee32df984dd0256..9f0a82d2b27f184ce600b8cd0a5c410ceed5c024 100644
+--- a/tests/CMakeLists.txt
++++ b/tests/CMakeLists.txt
+@@ -23,6 +23,9 @@ endif()
+ add_net_test_case(secure_tunneling_functionality_connect_test)
+ add_net_test_case(secure_tunneling_functionality_client_token_test)
+ add_net_test_case(secure_tunneling_fail_and_retry_connection_test)
++add_net_test_case(secure_tunneling_4xx_handshake_stops_without_retry_test)
++add_net_test_case(secure_tunneling_5xx_handshake_retries_test)
++add_net_test_case(secure_tunneling_expired_context_stops_without_retry_test)
+ add_net_test_case(secure_tunneling_store_service_ids_test)
+ add_net_test_case(secure_tunneling_receive_stream_start_test)
+ add_net_test_case(secure_tunneling_rejected_service_id_stream_start_test)
+diff --git a/tests/secure_tunnel_tests.c b/tests/secure_tunnel_tests.c
+index 2a0b2832f924d377975f7e35368a9cad244f994b..62ead47bb0a5380125dc87cb674a8dca91dc3fa5 100644
+--- a/tests/secure_tunnel_tests.c
++++ b/tests/secure_tunnel_tests.c
+@@ -113,6 +113,7 @@ struct aws_secure_tunnel_mock_test_fixture {
+     bool secure_tunnel_connected_succesfully;
+     bool secure_tunnel_connection_shutdown;
+     bool secure_tunnel_connection_failed;
++    bool secure_tunnel_stopped;
+     bool secure_tunnel_stream_started;
+     bool secure_tunnel_bad_stream_request;
+     bool secure_tunnel_stream_reset_received;
+@@ -143,6 +144,10 @@ struct aws_secure_tunnel_mock_test_fixture {
+         enum aws_secure_tunnel_message_type type;
+         int error_code;
+     } on_send_message_complete_result;
++
++    size_t websocket_connect_attempts;
++    size_t websocket_handshake_failures_remaining;
++    int websocket_handshake_response_status;
+ };
+ 
+ static bool s_secure_tunnel_check_active_stream_id(
+@@ -275,7 +280,12 @@ static void s_on_test_secure_tunnel_on_session_reset(void *user_data) {
+ }
+ 
+ static void s_on_test_secure_tunnel_on_stopped(void *user_data) {
+-    (void)user_data;
++    struct aws_secure_tunnel_mock_test_fixture *test_fixture = user_data;
++
++    aws_mutex_lock(&test_fixture->lock);
++    test_fixture->secure_tunnel_stopped = true;
++    aws_condition_variable_notify_all(&test_fixture->signal);
++    aws_mutex_unlock(&test_fixture->lock);
+ }
+ 
+ static void s_on_test_secure_tunnel_termination(void *user_data) {
+@@ -395,6 +405,18 @@ static void s_wait_for_connection_shutdown(struct aws_secure_tunnel_mock_test_fi
+     aws_mutex_unlock(&test_fixture->lock);
+ }
+ 
++static bool s_has_secure_tunnel_stopped(void *arg) {
++    struct aws_secure_tunnel_mock_test_fixture *test_fixture = arg;
++    return test_fixture->secure_tunnel_stopped;
++}
++
++static void s_wait_for_secure_tunnel_stopped(struct aws_secure_tunnel_mock_test_fixture *test_fixture) {
++    aws_mutex_lock(&test_fixture->lock);
++    aws_condition_variable_wait_pred(
++        &test_fixture->signal, &test_fixture->lock, s_has_secure_tunnel_stopped, test_fixture);
++    aws_mutex_unlock(&test_fixture->lock);
++}
++
+ static bool s_has_secure_tunnel_stream_started(void *arg) {
+     struct aws_secure_tunnel_mock_test_fixture *test_fixture = arg;
+     return test_fixture->secure_tunnel_stream_started;
+@@ -1057,6 +1079,128 @@ static int s_secure_tunneling_fail_and_retry_connection_test_fn(struct aws_alloc
+ 
+ AWS_TEST_CASE(secure_tunneling_fail_and_retry_connection_test, s_secure_tunneling_fail_and_retry_connection_test_fn)
+ 
++static int s_aws_websocket_client_connect_with_handshake_failure(
++    const struct aws_websocket_client_connection_options *options) {
++
++    struct aws_secure_tunnel *secure_tunnel = options->user_data;
++    struct aws_secure_tunnel_mock_test_fixture *test_fixture = secure_tunnel->config->user_data;
++    bool should_fail = false;
++    int handshake_response_status = 0;
++
++    aws_mutex_lock(&test_fixture->lock);
++    test_fixture->websocket_connect_attempts++;
++    if (test_fixture->websocket_handshake_failures_remaining > 0) {
++        test_fixture->websocket_handshake_failures_remaining--;
++        handshake_response_status = test_fixture->websocket_handshake_response_status;
++        should_fail = true;
++    }
++    aws_mutex_unlock(&test_fixture->lock);
++
++    if (!should_fail) {
++        return aws_websocket_client_connect_mock_fn(options);
++    }
++
++    struct aws_websocket_on_connection_setup_data websocket_setup = {
++        .error_code = AWS_ERROR_HTTP_WEBSOCKET_UPGRADE_FAILURE,
++        .handshake_response_status = &handshake_response_status,
++    };
++    options->on_connection_setup(&websocket_setup, secure_tunnel);
++
++    return AWS_OP_SUCCESS;
++}
++
++static int s_secure_tunneling_4xx_handshake_stops_without_retry_test_fn(
++    struct aws_allocator *allocator,
++    void *ctx) {
++
++    (void)ctx;
++    struct secure_tunnel_test_options test_options;
++    struct aws_secure_tunnel_mock_test_fixture test_fixture;
++    aws_secure_tunnel_mock_test_init(allocator, &test_options, &test_fixture, AWS_SECURE_TUNNELING_DESTINATION_MODE);
++    struct aws_secure_tunnel *secure_tunnel = test_fixture.secure_tunnel;
++
++    test_fixture.websocket_handshake_failures_remaining = 1;
++    test_fixture.websocket_handshake_response_status = 403;
++    test_fixture.secure_tunnel_vtable.aws_websocket_client_connect_fn =
++        s_aws_websocket_client_connect_with_handshake_failure;
++
++    ASSERT_SUCCESS(aws_secure_tunnel_start(secure_tunnel));
++    s_wait_for_secure_tunnel_stopped(&test_fixture);
++
++    ASSERT_INT_EQUALS((int)test_fixture.websocket_connect_attempts, 1);
++    ASSERT_INT_EQUALS(secure_tunnel->current_state, AWS_STS_STOPPED);
++    ASSERT_INT_EQUALS(secure_tunnel->desired_state, AWS_STS_STOPPED);
++
++    aws_secure_tunnel_mock_test_clean_up(&test_fixture);
++
++    return AWS_OP_SUCCESS;
++}
++
++AWS_TEST_CASE(
++    secure_tunneling_4xx_handshake_stops_without_retry_test,
++    s_secure_tunneling_4xx_handshake_stops_without_retry_test_fn)
++
++static int s_secure_tunneling_5xx_handshake_retries_test_fn(struct aws_allocator *allocator, void *ctx) {
++    (void)ctx;
++    struct secure_tunnel_test_options test_options;
++    struct aws_secure_tunnel_mock_test_fixture test_fixture;
++    aws_secure_tunnel_mock_test_init(allocator, &test_options, &test_fixture, AWS_SECURE_TUNNELING_DESTINATION_MODE);
++    struct aws_secure_tunnel *secure_tunnel = test_fixture.secure_tunnel;
++
++    test_fixture.websocket_handshake_failures_remaining = 1;
++    test_fixture.websocket_handshake_response_status = 503;
++    test_fixture.secure_tunnel_vtable.aws_websocket_client_connect_fn =
++        s_aws_websocket_client_connect_with_handshake_failure;
++
++    ASSERT_SUCCESS(aws_secure_tunnel_start(secure_tunnel));
++    s_wait_for_connected_successfully(&test_fixture);
++
++    ASSERT_INT_EQUALS((int)test_fixture.websocket_connect_attempts, 2);
++    ASSERT_INT_EQUALS(secure_tunnel->current_state, AWS_STS_CONNECTED);
++    ASSERT_INT_EQUALS(secure_tunnel->desired_state, AWS_STS_CONNECTED);
++
++    ASSERT_SUCCESS(aws_secure_tunnel_stop(secure_tunnel));
++    s_wait_for_connection_shutdown(&test_fixture);
++
++    aws_secure_tunnel_mock_test_clean_up(&test_fixture);
++
++    return AWS_OP_SUCCESS;
++}
++
++AWS_TEST_CASE(secure_tunneling_5xx_handshake_retries_test, s_secure_tunneling_5xx_handshake_retries_test_fn)
++
++static int s_secure_tunneling_expired_context_stops_without_retry_test_fn(
++    struct aws_allocator *allocator,
++    void *ctx) {
++
++    (void)ctx;
++    struct secure_tunnel_test_options test_options;
++    struct aws_secure_tunnel_mock_test_fixture test_fixture;
++    aws_secure_tunnel_mock_test_init(allocator, &test_options, &test_fixture, AWS_SECURE_TUNNELING_DESTINATION_MODE);
++    struct aws_secure_tunnel *secure_tunnel = test_fixture.secure_tunnel;
++
++    test_fixture.websocket_handshake_failures_remaining = 1;
++    test_fixture.websocket_handshake_response_status = 503;
++    test_fixture.secure_tunnel_vtable.aws_websocket_client_connect_fn =
++        s_aws_websocket_client_connect_with_handshake_failure;
++    secure_tunnel->reconnect_expiration_time_ns = 0;
++
++    ASSERT_SUCCESS(aws_secure_tunnel_start(secure_tunnel));
++    s_wait_for_secure_tunnel_stopped(&test_fixture);
++
++    ASSERT_INT_EQUALS((int)test_fixture.websocket_connect_attempts, 1);
++    ASSERT_INT_EQUALS(secure_tunnel->current_state, AWS_STS_STOPPED);
++    ASSERT_INT_EQUALS(secure_tunnel->desired_state, AWS_STS_STOPPED);
++
++    aws_secure_tunnel_mock_test_clean_up(&test_fixture);
++
++    return AWS_OP_SUCCESS;
++}
++
++AWS_TEST_CASE(
++    secure_tunneling_expired_context_stops_without_retry_test,
++    s_secure_tunneling_expired_context_stops_without_retry_test_fn)
++
+ static int s_secure_tunneling_store_service_ids_test_fn(struct aws_allocator *allocator, void *ctx) {
+     (void)ctx;
+     struct secure_tunnel_test_options test_options;
