@@ -3,6 +3,7 @@
 set -euo pipefail
 
 readonly architecture="${1:-x64}"
+readonly build_mode="${2:-native}"
 readonly openssl_version='3.5.7'
 readonly openssl_sha256='a8c0d28a529ca480f9f36cf5792e2cd21984552a3c8e4aa11a24aa31aeac98e8'
 
@@ -80,6 +81,7 @@ configure_common() {
     cmake -S "$repo_root" -B "$build_dir" -G Ninja \
         -DBUILD_SDK=ON \
         -DBUILD_TEST_DEPS=ON \
+        -DBUILD_TESTING=ON \
         -DCMAKE_C_COMPILER_LAUNCHER=ccache \
         -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
         -DCMAKE_CXX_FLAGS=-Wno-error=ignored-attributes \
@@ -96,7 +98,8 @@ build_targets() {
 }
 
 run_native() {
-    local build_dir="${repo_root}/build/x64"
+    local build_name="$1"
+    local build_dir="${repo_root}/build/${build_name}"
     local sdk_source_dir
 
     sdk_source_dir="$(prepare_sdk_source "$build_dir")"
@@ -109,7 +112,10 @@ run_native() {
 
     build_targets "$build_dir"
     cmake --build "$build_dir" \
-        --target aws-c-iot-tests \
+        --target \
+            aws-c-iot-tests \
+            EventstreamRpc-cpp-tests \
+            IotDeviceDefender-cpp-tests \
         --parallel 2
 
     AWS_CRT_MEMORY_TRACING=1 \
@@ -117,6 +123,13 @@ run_native() {
 
     ctest \
         --test-dir "${build_dir}/aws-c-iot-tests" \
+        --output-on-failure \
+        --parallel 2 \
+        --timeout 60 \
+        --no-tests=error
+
+    ctest \
+        --test-dir "${build_dir}/aws-iot-device-sdk-cpp-v2-build" \
         --output-on-failure \
         --parallel 2 \
         --timeout 60 \
@@ -178,6 +191,8 @@ run_cross() {
     sdk_source_dir="$(prepare_sdk_source "$build_dir")"
     configure_common "$build_dir" "$sdk_source_dir" \
         -DCMAKE_BUILD_TYPE=Release \
+        -DBUILD_AWS_C_IOT_TESTS=ON \
+        -DENABLE_NET_TESTS=ON \
         -DCMAKE_TOOLCHAIN_FILE="${repo_root}/${toolchain_file}"
 
     grep -Fq \
@@ -188,6 +203,12 @@ run_cross() {
         "${build_dir}/CMakeCache.txt"
 
     build_targets "$build_dir"
+    cmake --build "$build_dir" \
+        --target \
+            aws-c-iot-tests \
+            EventstreamRpc-cpp-tests \
+            IotDeviceDefender-cpp-tests \
+        --parallel 2
 
     "$readelf" -h "${build_dir}/aws-iot-device-client" |
         grep -Eq "Class:[[:space:]]+${expected_class}"
@@ -199,11 +220,14 @@ run_cross() {
         grep -Eq "Machine:[[:space:]]+${expected_machine}"
 }
 
-case "$architecture" in
-    x64)
-        run_native
+case "${architecture}:${build_mode}" in
+    x64:native)
+        run_native x64
         ;;
-    arm32)
+    arm64:native)
+        run_native arm64-native
+        ;;
+    arm32:cross)
         run_cross \
             arm32 \
             arm-linux-gnueabihf \
@@ -212,9 +236,9 @@ case "$architecture" in
             ELF32 \
             ARM
         ;;
-    arm64)
+    arm64:cross)
         run_cross \
-            arm64 \
+            arm64-cross \
             aarch64-linux-gnu \
             linux-aarch64 \
             cmake-toolchain/Toolchain-aarch64.cmake \
@@ -222,7 +246,8 @@ case "$architecture" in
             AArch64
         ;;
     *)
-        printf 'Unsupported architecture: %s\n' "$architecture" >&2
+        printf 'Unsupported architecture/mode: %s/%s\n' \
+            "$architecture" "$build_mode" >&2
         exit 2
         ;;
 esac
