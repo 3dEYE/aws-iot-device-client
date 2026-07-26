@@ -1,0 +1,122 @@
+name: Build and test
+
+on:
+  pull_request:
+  push:
+    branches:
+      - dev
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pr-tests-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-test:
+    name: ${{ matrix.job_name }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - architecture: x64
+            mode: native
+            runner: ubuntu-24.04
+            job_name: Build and test x64
+            step_name: Build and test
+          - architecture: arm64
+            mode: native
+            runner: ubuntu-24.04-arm
+            job_name: Build and test ARM64
+            step_name: Build and test
+          - architecture: arm32
+            mode: cross
+            runner: ubuntu-24.04
+            job_name: Cross-build ARM32
+            step_name: Cross-build and inspect
+
+    env:
+      AWS_IOT_DEVICE_SDK_CACHE_DIR: ${{ github.workspace }}/.ci-cache/aws-iot-device-sdk-cpp-v2
+      CROSS_OPENSSL_CACHE_DIR: ${{ github.workspace }}/.ci-cache/cross-openssl
+      CCACHE_BASEDIR: ${{ github.workspace }}
+      CCACHE_COMPILERCHECK: content
+      CCACHE_NOHASHDIR: "true"
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Read pinned SDK revision
+        id: sdk-pin
+        shell: bash
+        run: |
+          sdk_commit="$(
+            sed -n \
+              's/^set(AWS_IOT_DEVICE_SDK_COMMIT \([0-9a-f]\{40\}\))$/\1/p' \
+              cmake/AwsIotDeviceSdkPins.cmake
+          )"
+          if [[ ! "$sdk_commit" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "Unable to read the pinned AWS IoT Device SDK commit" >&2
+            exit 1
+          fi
+          echo "commit=$sdk_commit" >> "$GITHUB_OUTPUT"
+
+      - name: Restore pinned SDK source
+        id: sdk-cache
+        uses: actions/cache@v5
+        with:
+          path: .ci-cache/aws-iot-device-sdk-cpp-v2
+          key: aws-iot-device-sdk-source-v2-${{ steps.sdk-pin.outputs.commit }}
+
+      - name: Checkout pinned SDK source
+        if: steps.sdk-cache.outputs.cache-hit != 'true'
+        uses: actions/checkout@v6
+        with:
+          repository: aws/aws-iot-device-sdk-cpp-v2
+          ref: ${{ steps.sdk-pin.outputs.commit }}
+          path: .ci-cache/aws-iot-device-sdk-cpp-v2
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Prepare pinned SDK submodules
+        shell: bash
+        run: |
+          git config --global submodule.crt/aws-lc.update none
+          git -C "$AWS_IOT_DEVICE_SDK_CACHE_DIR" \
+            submodule update --init --recursive --force --depth 1
+
+      - name: Restore cross-compiled OpenSSL
+        if: matrix.mode == 'cross'
+        uses: actions/cache@v5
+        with:
+          path: .ci-cache/cross-openssl
+          key: >-
+            cross-openssl-${{ runner.os }}-${{ matrix.architecture }}-3.5.7-${{
+            hashFiles(
+              '.github/ci/build-and-test.sh',
+              'cmake-toolchain/Toolchain-armhf.cmake',
+              'cmake-toolchain/Toolchain-aarch64.cmake'
+            ) }}
+
+      - name: Restore compiler cache
+        uses: hendrikmuhs/ccache-action@d62db5f07c26379fc4b4e0916f098a92573c3b03  # v1.2.23
+        with:
+          key: ${{ matrix.architecture }}-${{ matrix.mode }}-ubuntu24-sdk-${{ steps.sdk-pin.outputs.commit }}
+          restore-keys: |
+            ${{ matrix.architecture }}-${{ matrix.mode }}-ubuntu24-sdk-
+          install: binary
+          max-size: 500M
+
+      - name: ${{ matrix.step_name }}
+        shell: bash
+        run: >-
+          .github/ci/build-and-test.sh
+          "${{ matrix.architecture }}"
+          "${{ matrix.mode }}"
