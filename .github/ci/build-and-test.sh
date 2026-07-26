@@ -139,12 +139,42 @@ run_native() {
 prepare_cross_openssl() {
     local configure_target="$1"
     local triplet="$2"
-    local prefix="/usr/lib/${triplet}"
+    local expected_machine="$3"
+    local cache_root
+    cache_root="$(
+        realpath -m \
+            "${CROSS_OPENSSL_CACHE_DIR:-${repo_root}/.ci-cache/cross-openssl}"
+    )"
+    local cache_prefix="${cache_root}/${triplet}/openssl-${openssl_version}"
     local archive="${RUNNER_TEMP:-/tmp}/openssl-${openssl_version}.tar.gz"
     local work_dir
 
-    if [[ -f "${prefix}/lib/libcrypto.a" && -f "${prefix}/lib/libssl.a" ]]; then
+    case "$cache_root" in
+        "${repo_root}/.ci-cache/"*)
+            ;;
+        *)
+            printf 'Cross OpenSSL cache must be inside %s/.ci-cache: %s\n' \
+                "$repo_root" "$cache_root" >&2
+            exit 1
+            ;;
+    esac
+
+    if cross_openssl_cache_is_valid \
+        "$cache_prefix" "$configure_target" "$triplet" "$expected_machine"; then
         return
+    fi
+
+    if [[ -e "$cache_prefix" ]]; then
+        case "$cache_prefix" in
+            "${cache_root}/${triplet}/openssl-${openssl_version}")
+                rm -rf -- "$cache_prefix"
+                ;;
+            *)
+                printf 'Refusing to clear unexpected OpenSSL cache path: %s\n' \
+                    "$cache_prefix" >&2
+                exit 1
+                ;;
+        esac
     fi
 
     curl \
@@ -161,16 +191,64 @@ prepare_cross_openssl() {
     work_dir="$(mktemp -d)"
     tar -xzf "$archive" -C "$work_dir" --strip-components=1
 
+    mkdir -p "$cache_prefix"
     (
         cd "$work_dir"
         ./Configure "$configure_target" shared no-tests \
-            --prefix="$prefix" \
-            --openssldir="${prefix}/openssl" \
+            --prefix="$cache_prefix" \
+            --openssldir="${cache_prefix}/openssl" \
             --libdir=lib \
             --cross-compile-prefix="/usr/bin/${triplet}-"
         make -s -j2 build_libs
-        sudo make -s install_dev
+        make -s install_dev
     )
+
+    printf '%s\n' \
+        "recipe=2" \
+        "openssl_version=${openssl_version}" \
+        "openssl_sha256=${openssl_sha256}" \
+        "configure_target=${configure_target}" \
+        "triplet=${triplet}" \
+        >"${cache_prefix}/device-client-cache-manifest"
+
+    if ! cross_openssl_cache_is_valid \
+        "$cache_prefix" "$configure_target" "$triplet" "$expected_machine"; then
+        printf 'Cross-compiled OpenSSL cache validation failed\n' >&2
+        exit 1
+    fi
+}
+
+cross_openssl_cache_is_valid() {
+    local cache_prefix="$1"
+    local configure_target="$2"
+    local triplet="$3"
+    local expected_machine="$4"
+    local manifest="${cache_prefix}/device-client-cache-manifest"
+    local library
+
+    [[ -f "$manifest" ]] || return 1
+    grep -Fxq "recipe=2" "$manifest" || return 1
+    grep -Fxq "openssl_version=${openssl_version}" "$manifest" || return 1
+    grep -Fxq "openssl_sha256=${openssl_sha256}" "$manifest" || return 1
+    grep -Fxq "configure_target=${configure_target}" "$manifest" || return 1
+    grep -Fxq "triplet=${triplet}" "$manifest" || return 1
+    [[ -f "${cache_prefix}/include/openssl/ssl.h" ]] || return 1
+
+    for library in libcrypto.a libssl.a; do
+        [[ -s "${cache_prefix}/lib/${library}" ]] || return 1
+        "${triplet}-readelf" -h "${cache_prefix}/lib/${library}" 2>/dev/null |
+            awk -v expected="$expected_machine" '
+                $1 == "Machine:" {
+                    count++
+                    if (index($0, expected) == 0) {
+                        invalid = 1
+                    }
+                }
+                END {
+                    exit !(count > 0 && invalid == 0)
+                }
+            ' || return 1
+    done
 }
 
 run_cross() {
@@ -183,23 +261,31 @@ run_cross() {
     local build_dir="${repo_root}/build/${build_name}"
     local sdk_source_dir
     local readelf="${triplet}-readelf"
+    local openssl_prefix
+    openssl_prefix="$(
+        realpath -m \
+            "${CROSS_OPENSSL_CACHE_DIR:-${repo_root}/.ci-cache/cross-openssl}/${triplet}/openssl-${openssl_version}"
+    )"
 
     sudo apt-get update -qq
     sudo apt-get install --yes --no-install-recommends "g++-${triplet}"
-    prepare_cross_openssl "$configure_target" "$triplet"
+    prepare_cross_openssl \
+        "$configure_target" "$triplet" "$expected_machine"
 
     sdk_source_dir="$(prepare_sdk_source "$build_dir")"
     configure_common "$build_dir" "$sdk_source_dir" \
         -DCMAKE_BUILD_TYPE=Release \
         -DBUILD_AWS_C_IOT_TESTS=ON \
         -DENABLE_NET_TESTS=ON \
+        -DAWS_IOT_DEVICE_CLIENT_OPENSSL_ROOT="$openssl_prefix" \
+        -DOPENSSL_ROOT_DIR="$openssl_prefix" \
         -DCMAKE_TOOLCHAIN_FILE="${repo_root}/${toolchain_file}"
 
     grep -Fq \
-        "/usr/lib/${triplet}/lib/libcrypto.a" \
+        "${openssl_prefix}/lib/libcrypto.a" \
         "${build_dir}/CMakeCache.txt"
     grep -Fq \
-        "/usr/lib/${triplet}/lib/libssl.a" \
+        "${openssl_prefix}/lib/libssl.a" \
         "${build_dir}/CMakeCache.txt"
 
     build_targets "$build_dir"

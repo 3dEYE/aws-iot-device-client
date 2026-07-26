@@ -13,7 +13,16 @@ SET(CMAKE_C_COMPILER   /usr/bin/arm-linux-gnueabihf-gcc)
 SET(CMAKE_CXX_COMPILER /usr/bin/arm-linux-gnueabihf-g++)
 
 # where is the target environment 
-SET(CMAKE_FIND_ROOT_PATH  /usr/lib/arm-linux-gnueabihf;/usr/arm-linux-gnueabihf)
+if (AWS_IOT_DEVICE_CLIENT_OPENSSL_ROOT)
+    SET(CMAKE_FIND_ROOT_PATH
+            ${AWS_IOT_DEVICE_CLIENT_OPENSSL_ROOT}
+            /usr/lib/arm-linux-gnueabihf
+            /usr/arm-linux-gnueabihf)
+else ()
+    SET(CMAKE_FIND_ROOT_PATH
+            /usr/lib/arm-linux-gnueabihf
+            /usr/arm-linux-gnueabihf)
+endif ()
 
 # search for programs in the build host directories
 SET(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM BOTH)
@@ -27,7 +36,15 @@ SET(S2N_NO_PQ ON)
 set(CMAKE_FIND_DEBUG_MODE TRUE)
 
 #Fix some wonkiness in the S2N build
-SET(LibCrypto_SHARED_LIBRARY /usr/lib/arm-linux-gnueabihf/lib/libcrypto.so)
-SET(LibCrypto_STATIC_LIBRARY /usr/lib/arm-linux-gnueabihf/lib/libcrypto.a)
+if (AWS_IOT_DEVICE_CLIENT_OPENSSL_ROOT)
+    SET(LibCrypto_SHARED_LIBRARY
+            ${AWS_IOT_DEVICE_CLIENT_OPENSSL_ROOT}/lib/libcrypto.so)
+    SET(LibCrypto_STATIC_LIBRARY
+            ${AWS_IOT_DEVICE_CLIENT_OPENSSL_ROOT}/lib/libcrypto.a)
+    include_directories(${AWS_IOT_DEVICE_CLIENT_OPENSSL_ROOT}/include)
+else ()
+    SET(LibCrypto_SHARED_LIBRARY /usr/lib/arm-linux-gnueabihf/lib/libcrypto.so)
+    SET(LibCrypto_STATIC_LIBRARY /usr/lib/arm-linux-gnueabihf/lib/libcrypto.a)
+endif ()
 
 include_directories(/usr/include)
