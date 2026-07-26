@@ -1,8 +1,11 @@
 cmake_minimum_required(VERSION 3.10)
 project(aws-iot-device-client)
 
+include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/AwsIotDeviceSdkPins.cmake")
+
 option(BUILD_SDK "Builds the aws-iot-device-sdk-cpp-v2 as part of build. Only do this if the SDK is not installed." ON)
 option(BUILD_TEST_DEPS "Builds the device client test dependencies as part of build. Only do this if you do not have gtest installed and you wish to run the tests." ON)
+option(BUILD_AWS_C_IOT_TESTS "Builds the aws-c-iot tests from the bundled SDK source." OFF)
 option(LINK_DL "Links the dlopen library with the Device Client." OFF)
 option(EXCLUDE_JOBS "Builds the device client without the IoT Jobs Feature." OFF)
 option(EXCLUDE_DD "Builds the device client without the IoT Device Defender Feature." OFF)
@@ -18,6 +21,8 @@ option(EXCLUDE_SECURE_ELEMENT "Builds the device client without the support for 
 option(EXCLUDE_SENSOR_PUBLISH "Builds the device client without the Sensor Publish over MQTT Feature." OFF)
 option(EXCLUDE_SENSOR_PUBLISH_SAMPLES "Builds the device client without the Sensor Publish sample servers." OFF)
 option(GIT_VERSION "Updates the version number using the Git commit history" ON)
+set(AWS_IOT_DEVICE_SDK_SOURCE_DIR "" CACHE PATH
+        "Optional pre-fetched aws-iot-device-sdk-cpp-v2 source directory")
 
 if (EXCLUDE_JOBS)
     add_definitions(-DEXCLUDE_JOBS)
@@ -167,16 +172,66 @@ if (BUILD_SDK)
     # Download and unpack aws iot device sdk cpp v2 at configure time
     set(BUILD_DEPS ON CACHE BOOL "Build dependencies for the AWS SDK" FORCE)
     set(USE_OPENSSL ON CACHE BOOL "Use OpenSSL instead of aws-lc" FORCE)
-    configure_file(CMakeLists.txt.awssdk
-            aws-iot-device-sdk-cpp-v2-download/CMakeLists.txt)
-    execute_process(COMMAND ${CMAKE_COMMAND} -G "${CMAKE_GENERATOR}" .
-            WORKING_DIRECTORY ${CMAKE_BINARY_DIR}/aws-iot-device-sdk-cpp-v2-download)
-    execute_process(COMMAND ${CMAKE_COMMAND} --build .
-            WORKING_DIRECTORY ${CMAKE_BINARY_DIR}/aws-iot-device-sdk-cpp-v2-download)
+
+    if (AWS_IOT_DEVICE_SDK_SOURCE_DIR)
+        get_filename_component(AWS_IOT_DEVICE_SDK_SOURCE_PATH
+                "${AWS_IOT_DEVICE_SDK_SOURCE_DIR}" REALPATH
+                BASE_DIR "${CMAKE_CURRENT_SOURCE_DIR}")
+        if (NOT EXISTS "${AWS_IOT_DEVICE_SDK_SOURCE_PATH}/CMakeLists.txt")
+            message(FATAL_ERROR
+                    "AWS_IOT_DEVICE_SDK_SOURCE_DIR must identify an "
+                    "aws-iot-device-sdk-cpp-v2 source directory")
+        endif ()
+
+        execute_process(
+                COMMAND "${GIT_EXECUTABLE}" rev-parse HEAD
+                WORKING_DIRECTORY "${AWS_IOT_DEVICE_SDK_SOURCE_PATH}"
+                RESULT_VARIABLE AWS_IOT_DEVICE_SDK_REV_PARSE_RESULT
+                OUTPUT_VARIABLE AWS_IOT_DEVICE_SDK_ACTUAL_COMMIT
+                ERROR_VARIABLE AWS_IOT_DEVICE_SDK_REV_PARSE_ERROR
+                OUTPUT_STRIP_TRAILING_WHITESPACE)
+        if (NOT "${AWS_IOT_DEVICE_SDK_REV_PARSE_RESULT}" STREQUAL "0")
+            message(FATAL_ERROR
+                    "Unable to inspect the pre-fetched AWS IoT Device SDK: "
+                    "${AWS_IOT_DEVICE_SDK_REV_PARSE_ERROR}")
+        endif ()
+
+        if (NOT "${AWS_IOT_DEVICE_SDK_ACTUAL_COMMIT}" STREQUAL
+                "${AWS_IOT_DEVICE_SDK_COMMIT}")
+            message(FATAL_ERROR
+                    "AWS_IOT_DEVICE_SDK_SOURCE_DIR contains "
+                    "${AWS_IOT_DEVICE_SDK_ACTUAL_COMMIT}; expected "
+                    "${AWS_IOT_DEVICE_SDK_COMMIT}")
+        endif ()
+
+        message(STATUS
+                "Using pre-fetched AWS IoT Device SDK source at "
+                "${AWS_IOT_DEVICE_SDK_SOURCE_PATH}")
+    else ()
+        configure_file(CMakeLists.txt.awssdk
+                aws-iot-device-sdk-cpp-v2-download/CMakeLists.txt)
+        execute_process(COMMAND ${CMAKE_COMMAND} -G "${CMAKE_GENERATOR}" .
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR}/aws-iot-device-sdk-cpp-v2-download)
+        execute_process(COMMAND ${CMAKE_COMMAND} --build .
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR}/aws-iot-device-sdk-cpp-v2-download)
+        set(AWS_IOT_DEVICE_SDK_SOURCE_PATH
+                "${CMAKE_BINARY_DIR}/aws-iot-device-sdk-cpp-v2-src")
+    endif ()
 
     # Add aws-iot-device-sdk-cpp-v2 directly to the build
-    add_subdirectory(${CMAKE_BINARY_DIR}/aws-iot-device-sdk-cpp-v2-src
+    add_subdirectory(${AWS_IOT_DEVICE_SDK_SOURCE_PATH}
             ${CMAKE_BINARY_DIR}/aws-iot-device-sdk-cpp-v2-build)
+
+    if (BUILD_AWS_C_IOT_TESTS)
+        list(APPEND CMAKE_MODULE_PATH
+                "${AWS_IOT_DEVICE_SDK_SOURCE_PATH}/crt/aws-crt-cpp/crt/aws-c-common/cmake")
+        set(AWS_IOT_DEVICE_CLIENT_PROJECT_NAME "${PROJECT_NAME}")
+        set(PROJECT_NAME aws-c-iot)
+        add_subdirectory(
+                "${AWS_IOT_DEVICE_SDK_SOURCE_PATH}/crt/aws-c-iot/tests"
+                "${CMAKE_BINARY_DIR}/aws-c-iot-tests")
+        set(PROJECT_NAME "${AWS_IOT_DEVICE_CLIENT_PROJECT_NAME}")
+    endif ()
 else ()
     include_directories(/include)
     link_directories(/lib)
