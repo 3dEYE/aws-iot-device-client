@@ -80,6 +80,7 @@ configure() {
         -DBUILD_TESTING=ON \
         -DCMAKE_BUILD_TYPE=Debug \
         -DBUILD_AWS_C_IOT_TESTS=ON \
+        -DBUILD_AWS_C_MQTT_TESTS=ON \
         -DENABLE_NET_TESTS=ON \
         -DLINK_DL=ON \
         -DCMAKE_C_COMPILER_LAUNCHER=ccache \
@@ -97,6 +98,7 @@ build_targets() {
             aws-iot-device-client \
             test-aws-iot-device-client \
             aws-c-iot-tests \
+            aws-c-mqtt-tests \
             EventstreamRpc-cpp-tests \
             IotDeviceDefender-cpp-tests \
         --parallel 2
@@ -106,6 +108,7 @@ require_test_build() {
     if [[ ! -f "${build_dir}/CMakeCache.txt" ||
           ! -x "${build_dir}/test/test-aws-iot-device-client" ||
           ! -d "${build_dir}/aws-c-iot-tests" ||
+          ! -d "${build_dir}/aws-c-mqtt-tests" ||
           ! -d "${build_dir}/aws-iot-device-sdk-cpp-v2-build" ]]; then
         printf '%s\n' \
             'The named Docker volume does not contain a complete x64 test build.' \
@@ -124,6 +127,13 @@ run_tests() {
         --test-dir "${build_dir}/aws-c-iot-tests" \
         --output-on-failure \
         --parallel 2 \
+        --timeout 60 \
+        --no-tests=error
+
+    ctest \
+        --test-dir "${build_dir}/aws-c-mqtt-tests" \
+        --output-on-failure \
+        --tests-regex '^mqtt_connection_sub_timeout$' \
         --timeout 60 \
         --no-tests=error
 

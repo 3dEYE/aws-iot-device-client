@@ -66,6 +66,7 @@ cmake --build build \
     aws-iot-device-client \
     test-aws-iot-device-client \
     aws-c-iot-tests \
+    aws-c-mqtt-tests \
     EventstreamRpc-cpp-tests \
     IotDeviceDefender-cpp-tests \
   --parallel 2
@@ -81,6 +82,13 @@ ctest \
   --test-dir build/aws-c-iot-tests \
   --output-on-failure \
   --parallel 2 \
+  --timeout 60 \
+  --no-tests=error
+
+ctest \
+  --test-dir build/aws-c-mqtt-tests \
+  --output-on-failure \
+  --tests-regex '^mqtt_connection_sub_timeout$' \
   --timeout 60 \
   --no-tests=error
 
