@@ -3,11 +3,11 @@
 # so that it can be written to the logs for debugging purposes. To increment the major/minor versions
 # of the device client, this module expects to find a git tag in the form of "v1.0", where the first number
 # is the major version and the second number is the minor version. This module will search starting at HEAD
-# for the nearest numeric version tag, then count from the first reachable tag on that major/minor line.
+# for the nearest numeric version tag, then select a base on that major/minor line.
 # Generated release tags include a patch and commit SHA and must not become the base for the next patch calculation.
 #
-# Additionally, the PATCH version of the version number is automatically incremented based on the number of commits
-# that we see between the current revision and the latest Git tag. For more information on Semantic Versioning,
+# Additionally, the PATCH version is calculated from the selected line base tag and the number of commits
+# between that base and the current revision. For more information on Semantic Versioning,
 # check out https://semver.org/ and for more information on Git tags, check out https://git-scm.com/book/en/v2/Git-Basics-Tagging
 
 cmake_minimum_required(VERSION 3.10)
@@ -91,53 +91,34 @@ if (GIT_VERSION AND NOT ${GIT_INFO} STREQUAL "")
 
     set(VERSION_LINE_MAJOR "${CMAKE_MATCH_1}")
     set(VERSION_LINE_MINOR "${CMAKE_MATCH_2}")
-    set(VERSION_BASE_TAG "")
-    set(VERSION_BASE_PATCH "")
+    set(VERSION_BASE_TAG "${VERSION_LINE_TAG}")
+    set(VERSION_BASE_PATCH "0")
 
-    # Prefer an exact vMAJOR.MINOR base. Some upstream lines begin at
-    # vMAJOR.MINOR.0 instead, so otherwise select the lowest reachable numeric
-    # patch tag on the chosen line.
-    foreach (VERSION_TAG IN LISTS VERSION_TAGS)
-        if ("${VERSION_TAG}" STREQUAL "v${VERSION_LINE_MAJOR}.${VERSION_LINE_MINOR}")
-            execute_process(
-                COMMAND ${GIT_EXECUTABLE} merge-base --is-ancestor "${VERSION_TAG}" HEAD
-                WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
-                OUTPUT_QUIET
-                ERROR_QUIET
-                RESULT_VARIABLE tag_is_ancestor)
-            if (tag_is_ancestor EQUAL 0)
-                set(VERSION_BASE_TAG "${VERSION_TAG}")
-                break()
-            endif()
-        elseif ("${VERSION_TAG}" MATCHES
-                "^v${VERSION_LINE_MAJOR}\\.${VERSION_LINE_MINOR}\\.([0-9]+)$")
-            set(VERSION_TAG_PATCH "${CMAKE_MATCH_1}")
-            execute_process(
-                COMMAND ${GIT_EXECUTABLE} merge-base --is-ancestor "${VERSION_TAG}" HEAD
-                WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
-                OUTPUT_QUIET
-                ERROR_QUIET
-                RESULT_VARIABLE tag_is_ancestor)
-            if (tag_is_ancestor EQUAL 0)
-                if ("${VERSION_BASE_TAG}" STREQUAL "")
-                    set(VERSION_BASE_TAG "${VERSION_TAG}")
-                    set(VERSION_BASE_PATCH "${VERSION_TAG_PATCH}")
-                elseif (VERSION_TAG_PATCH LESS VERSION_BASE_PATCH)
-                    set(VERSION_BASE_TAG "${VERSION_TAG}")
-                    set(VERSION_BASE_PATCH "${VERSION_TAG_PATCH}")
-                endif()
-            endif()
+    if ("${VERSION_LINE_TAG}" MATCHES "^v[0-9]+\\.[0-9]+\\.([0-9]+)$")
+        set(VERSION_BASE_PATCH "${CMAKE_MATCH_1}")
+    endif()
+
+    # Prefer an exact vMAJOR.MINOR line base when it is reachable. Otherwise,
+    # use the nearest numeric patch tag so builds at an official patch tag
+    # retain that tag's patch value.
+    set(VERSION_BARE_TAG "v${VERSION_LINE_MAJOR}.${VERSION_LINE_MINOR}")
+    list(FIND VERSION_TAGS "${VERSION_BARE_TAG}" VERSION_BARE_TAG_INDEX)
+    if (NOT VERSION_BARE_TAG_INDEX EQUAL -1)
+        execute_process(
+            COMMAND ${GIT_EXECUTABLE} merge-base --is-ancestor "${VERSION_BARE_TAG}" HEAD
+            WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+            OUTPUT_QUIET
+            ERROR_QUIET
+            RESULT_VARIABLE tag_is_ancestor)
+        if (tag_is_ancestor EQUAL 0)
+            set(VERSION_BASE_TAG "${VERSION_BARE_TAG}")
+            set(VERSION_BASE_PATCH "0")
         endif()
-    endforeach()
-
-    if ("${VERSION_BASE_TAG}" STREQUAL "")
-        load_version_from_file()
-        return()
     endif()
 
     set(${PROJECT_NAME}_VERSION_STRING "${VERSION_BASE_TAG}")
 
-    # Determine how many commits since last tag
+    # Determine how many commits since the selected base tag
     execute_process(COMMAND ${GIT_EXECUTABLE} rev-list ${${PROJECT_NAME}_VERSION_STRING}..HEAD --count
         WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
         OUTPUT_VARIABLE ${PROJECT_NAME}_VERSION_AHEAD
@@ -170,7 +151,8 @@ if (GIT_VERSION AND NOT ${GIT_INFO} STREQUAL "")
         0 ${PROJECT_NAME}_VERSION_MAJOR)
     list(GET ${PROJECT_NAME}_PARTIAL_VERSION_LIST
         1 ${PROJECT_NAME}_VERSION_MINOR)
-    set(${PROJECT_NAME}_VERSION_PATCH ${${PROJECT_NAME}_VERSION_AHEAD})
+    math(EXPR ${PROJECT_NAME}_VERSION_PATCH
+        "${VERSION_BASE_PATCH} + ${${PROJECT_NAME}_VERSION_AHEAD}")
 
     # Unset the list
     unset(${PROJECT_NAME}_PARTIAL_VERSION_LIST)

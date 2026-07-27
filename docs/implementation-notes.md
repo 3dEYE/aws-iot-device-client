@@ -12,3 +12,9 @@ track progress and reject stale work. The current design assumes that the
 pinned SDK/CRT `Subscribe*` path queues MQTT work without synchronously
 re-entering connection-resumed handlers. Revalidate this assumption when
 dependency pins, forwarding wrappers, or callback routing change.
+
+## Linux release compatibility baseline
+
+Ubuntu 22.04 (Jammy) is the minimum Linux userspace target by design.
+Pull-request validation and manual-release artifact builds therefore use the
+same Jammy runner baseline and Release build recipe.

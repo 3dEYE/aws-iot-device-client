@@ -75,3 +75,53 @@ if [[ "$third_version" != "v1.10.2-${third_sha}" ]]; then
 fi
 
 printf 'Version advanced from numeric line base: %s\n' "$third_version"
+
+git -C "$test_repo" tag v2.3.5
+
+fourth_sha="$(git -C "$test_repo" rev-parse --short HEAD)"
+fourth_version="$(generate_version)"
+readonly fourth_sha fourth_version
+if [[ "$fourth_version" != "v2.3.5-${fourth_sha}" ]]; then
+    printf 'Expected v2.3.5-%s at non-zero numeric base, got %s\n' \
+        "$fourth_sha" "$fourth_version" >&2
+    exit 1
+fi
+
+git -C "$test_repo" commit --quiet --allow-empty \
+    --message "Non-zero base change"
+
+fifth_sha="$(git -C "$test_repo" rev-parse --short HEAD)"
+fifth_version="$(generate_version)"
+readonly fifth_sha fifth_version
+if [[ "$fifth_version" != "v2.3.6-${fifth_sha}" ]]; then
+    printf 'Expected v2.3.6-%s after non-zero numeric base, got %s\n' \
+        "$fifth_sha" "$fifth_version" >&2
+    exit 1
+fi
+
+printf 'Version preserved non-zero numeric base: %s\n' "$fifth_version"
+
+git -C "$test_repo" tag v2.3.8
+
+sixth_sha="$(git -C "$test_repo" rev-parse --short HEAD)"
+sixth_version="$(generate_version)"
+readonly sixth_sha sixth_version
+if [[ "$sixth_version" != "v2.3.8-${sixth_sha}" ]]; then
+    printf 'Expected v2.3.8-%s at later numeric tag, got %s\n' \
+        "$sixth_sha" "$sixth_version" >&2
+    exit 1
+fi
+
+git -C "$test_repo" commit --quiet --allow-empty \
+    --message "Later numeric base change"
+
+seventh_sha="$(git -C "$test_repo" rev-parse --short HEAD)"
+seventh_version="$(generate_version)"
+readonly seventh_sha seventh_version
+if [[ "$seventh_version" != "v2.3.9-${seventh_sha}" ]]; then
+    printf 'Expected v2.3.9-%s after later numeric tag, got %s\n' \
+        "$seventh_sha" "$seventh_version" >&2
+    exit 1
+fi
+
+printf 'Version advanced from nearest numeric base: %s\n' "$seventh_version"
