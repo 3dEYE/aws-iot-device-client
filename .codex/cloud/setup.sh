@@ -2,6 +2,7 @@
 
 set -euo pipefail
 
+readonly repo_url='https://github.com/3dEYE/aws-iot-device-client.git'
 repo_root="$(git rev-parse --show-toplevel)"
 readonly repo_root
 readonly build_dir="${repo_root}/build"
@@ -27,10 +28,9 @@ prepare_git_metadata() {
     local version_tag
 
     if [[ "$(git rev-parse --is-shallow-repository)" == "true" ]]; then
-        git fetch --force --unshallow --tags
-    elif ! git describe \
-        --abbrev=0 --tags --match 'v[0-9]*' >/dev/null 2>&1; then
-        git fetch --force --tags
+        git fetch --force --unshallow --tags "$repo_url"
+    else
+        git fetch --force --tags "$repo_url"
     fi
 
     if ! version_tag="$(

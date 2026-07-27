@@ -17,6 +17,8 @@ Get-Command docker -ErrorAction Stop | Out-Null
 $dockerArguments = @(
     "run"
     "--rm"
+    "--platform"
+    "linux/amd64"
     "--entrypoint"
     "/bin/bash"
     "--mount"
