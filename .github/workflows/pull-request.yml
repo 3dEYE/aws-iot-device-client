@@ -53,6 +53,11 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      - name: Test release version derivation
+        if: matrix.architecture == 'x64' && matrix.mode == 'native'
+        shell: bash
+        run: bash .github/ci/test-versioning.sh
+
       - name: Read pinned SDK revision
         id: sdk-pin
         shell: bash
@@ -120,3 +125,4 @@ jobs:
           .github/ci/build-and-test.sh
           "${{ matrix.architecture }}"
           "${{ matrix.mode }}"
+          Release

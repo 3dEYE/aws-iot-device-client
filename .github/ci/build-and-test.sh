@@ -4,8 +4,18 @@ set -euo pipefail
 
 readonly architecture="${1:-x64}"
 readonly build_mode="${2:-native}"
+readonly native_build_type="${3:-Debug}"
 readonly openssl_version='3.5.7'
 readonly openssl_sha256='a8c0d28a529ca480f9f36cf5792e2cd21984552a3c8e4aa11a24aa31aeac98e8'
+
+case "$native_build_type" in
+    Debug|Release)
+        ;;
+    *)
+        printf 'Unsupported native build type: %s\n' "$native_build_type" >&2
+        exit 2
+        ;;
+esac
 
 repo_root="$(git rev-parse --show-toplevel)"
 readonly repo_root
@@ -99,13 +109,14 @@ build_targets() {
 
 run_native() {
     local build_name="$1"
+    local build_type="$2"
     local build_dir="${repo_root}/build/${build_name}"
     local sdk_source_dir
 
     sdk_source_dir="$(prepare_sdk_source "$build_dir")"
 
     configure_common "$build_dir" "$sdk_source_dir" \
-        -DCMAKE_BUILD_TYPE=Debug \
+        -DCMAKE_BUILD_TYPE="$build_type" \
         -DBUILD_AWS_C_IOT_TESTS=ON \
         -DENABLE_NET_TESTS=ON \
         -DLINK_DL=ON
@@ -308,10 +319,10 @@ run_cross() {
 
 case "${architecture}:${build_mode}" in
     x64:native)
-        run_native x64
+        run_native x64 "$native_build_type"
         ;;
     arm64:native)
-        run_native arm64-native
+        run_native arm64-native "$native_build_type"
         ;;
     arm32:cross)
         run_cross \
