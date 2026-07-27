@@ -552,13 +552,7 @@ void JobsFeature::startNextPendingJobReceivedHandler(StartNextJobExecutionRespon
             return;
         }
 
-        if (!isDuplicateNotification(response->Execution.value()))
-        {
-            handlingJob.store(true);
-
-            copyJobsNotification(response->Execution.value());
-            initJob(response->Execution.value());
-        }
+        handleJob(response->Execution.value());
     }
     else
     {
@@ -610,14 +604,7 @@ void JobsFeature::nextJobChangedHandler(NextJobExecutionChangedEvent *event, int
             return;
         }
 
-        // Check to see if this is a duplicate notification
-        if (!isDuplicateNotification(event->Execution.value()))
-        {
-            handlingJob.store(true);
-
-            copyJobsNotification(event->Execution.value());
-            initJob(event->Execution.value());
-        }
+        handleJob(event->Execution.value());
     }
     else
     {
@@ -845,45 +832,28 @@ void JobsFeature::publishUpdateJobExecutionStatusWithRetry(
     updateJobExecutionThread.detach();
 }
 
-void JobsFeature::copyJobsNotification(Iotjobs::JobExecutionData job)
+void JobsFeature::handleJob(const JobExecutionData &job)
 {
-    unique_lock<mutex> copyNotificationLock(latestJobsNotificationLock);
-    latestJobsNotification.JobId = job.JobId.value();
-    latestJobsNotification.JobDocument = job.JobDocument.value();
-    latestJobsNotification.ExecutionNumber = job.ExecutionNumber.value();
+    if (tryStartJob(job))
+    {
+        initJob(job);
+    }
 }
 
-bool JobsFeature::isDuplicateNotification(JobExecutionData job)
+bool JobsFeature::tryStartJob(const JobExecutionData &job)
 {
-    unique_lock<mutex> readLatestNotificationLock(latestJobsNotificationLock);
-    if (!latestJobsNotification.JobId.has_value())
+    unique_lock<mutex> notificationLock(latestJobsNotificationLock);
+    if (latestJobsNotification.JobId.has_value() && latestJobsNotification.ExecutionNumber.has_value() &&
+        job.JobId.value() == latestJobsNotification.JobId.value() &&
+        job.ExecutionNumber.value() == latestJobsNotification.ExecutionNumber.value())
     {
-        // We have not seen a job yet
-        LOG_DEBUG(TAG, "We have not seen a job yet, this is not a duplicate job notification");
+        LOG_DEBUG(TAG, "Encountered a duplicate job notification");
         return false;
     }
 
-    if (strcmp(job.JobId.value().c_str(), latestJobsNotification.JobId.value().c_str()) != 0)
-    {
-        LOG_DEBUG(TAG, "Job ids differ");
-        return false;
-    }
-
-    if (strcmp(
-            job.JobDocument.value().View().WriteCompact().c_str(),
-            latestJobsNotification.JobDocument.value().View().WriteCompact().c_str()) != 0)
-    {
-        LOG_DEBUG(TAG, "Job document differs");
-        return false;
-    }
-
-    if (job.ExecutionNumber.value() != latestJobsNotification.ExecutionNumber.value())
-    {
-        LOG_DEBUG(TAG, "Execution number differs");
-        return false;
-    }
-
-    LOG_DEBUG(TAG, "Encountered a duplicate job notification");
+    handlingJob.store(true);
+    latestJobsNotification.JobId = job.JobId.value();
+    latestJobsNotification.ExecutionNumber = job.ExecutionNumber.value();
     return true;
 }
 

@@ -340,6 +340,16 @@ ACTION_P(InvokeSubAck, ioError)
     return true;
 }
 
+ACTION_P(InvokeSubAckAndMaybeSaveResponse, response)
+{
+    if (response != nullptr)
+    {
+        *response = arg2;
+    }
+    arg3(0);
+    return true;
+}
+
 enum class StartupSubscription
 {
     START_NEXT_ACCEPTED,
@@ -364,7 +374,9 @@ ACTION_P3(InvokeOrCaptureSubAck, capture, savedCallback, callbackCaptured)
 static void expectSuccessfulJobsStartup(
     MockJobsFeature &jobsFeature,
     const shared_ptr<MockJobsClient> &client,
-    const Aws::Crt::String &thingName)
+    const Aws::Crt::String &thingName,
+    Iotjobs::OnSubscribeToStartNextPendingJobExecutionAcceptedResponse *startNextAcceptedResponse = nullptr,
+    Iotjobs::OnSubscribeToNextJobExecutionChangedEventsResponse *nextJobChangedResponse = nullptr)
 {
     EXPECT_CALL(jobsFeature, createJobsClient()).Times(1).WillOnce(Return(client));
     EXPECT_CALL(
@@ -372,7 +384,7 @@ static void expectSuccessfulJobsStartup(
         SubscribeToStartNextPendingJobExecutionAccepted(
             ThingNameEq(thingName), AWS_MQTT_QOS_AT_LEAST_ONCE, _, _))
         .Times(1)
-        .WillOnce(InvokeSubAck(0));
+        .WillOnce(InvokeSubAckAndMaybeSaveResponse(startNextAcceptedResponse));
     EXPECT_CALL(
         *client,
         SubscribeToStartNextPendingJobExecutionRejected(
@@ -383,7 +395,7 @@ static void expectSuccessfulJobsStartup(
         *client,
         SubscribeToNextJobExecutionChangedEvents(ThingNameEq(thingName), AWS_MQTT_QOS_AT_LEAST_ONCE, _, _))
         .Times(1)
-        .WillOnce(InvokeSubAck(0));
+        .WillOnce(InvokeSubAckAndMaybeSaveResponse(nextJobChangedResponse));
     EXPECT_CALL(
         *client,
         SubscribeToUpdateJobExecutionAccepted(ThingNameEq(thingName), AWS_MQTT_QOS_AT_LEAST_ONCE, _, _))
@@ -1764,82 +1776,94 @@ TEST_F(TestJobsFeature, ExecuteJobStdOutAndStderror)
     EXPECT_EQ(std::future_status::ready, promise.get_future().wait_for(std::chrono::seconds(3)));
 }
 
-TEST_F(TestJobsFeature, ExecuteJobDuplicateNotificaton)
+TEST_F(TestJobsFeature, ConcurrentDuplicateNotificationsExecuteOnce)
 {
-    /**
-     * Sends duplicate StartNextJobExecutionResponse to handler callback. Expect to only update and execute 1
-     * JobExecution
-     */
-    const JobExecutionData job = getSampleJobExecution("job1", 1);
-    startNextJobExecutionResponse->Execution = Aws::Crt::Optional<JobExecutionData>(job);
-
-    // As JobEngine is run in a separate thread this is needed so that the tests wait for that thread to update JE
-    std::promise<void> promise;
-    auto setPromise = [&promise]() -> void { promise.set_value(); };
-
-    string stdoutput = "test output";
+    JobExecutionData job = getSampleJobExecution("job1", 1);
+    job.JobDocument = Aws::Crt::Optional<JsonObject>(JsonObject(R"({"version":"1.0"})"));
     Iotjobs::OnSubscribeToStartNextPendingJobExecutionAcceptedResponse startNextAcceptedResponse;
+    Iotjobs::OnSubscribeToNextJobExecutionChangedEventsResponse nextJobChangedResponse;
+    expectSuccessfulJobsStartup(
+        *jobsMock, mockClient, ThingName, &startNextAcceptedResponse, &nextJobChangedResponse);
 
-    EXPECT_CALL(*jobsMock, createJobEngine()).Times(1).WillOnce(Return(mockEngine));
-    EXPECT_CALL(*mockEngine, exec_steps(_, _)).WillOnce(Return(0));
-    EXPECT_CALL(*mockEngine, hasErrors()).WillOnce(Return(1));
-    EXPECT_CALL(*mockEngine, getReason(_)).WillOnce(Return(""));
-    EXPECT_CALL(*mockEngine, getStdOut()).WillOnce(Return(stdoutput));
-    EXPECT_CALL(*mockEngine, getStdErr()).WillOnce(Return(""));
-
-    EXPECT_CALL(*jobsMock, createJobsClient()).Times(1).WillOnce(Return(mockClient));
-
-    EXPECT_CALL(
-        *mockClient,
-        SubscribeToStartNextPendingJobExecutionAccepted(ThingNameEq(ThingName), AWS_MQTT_QOS_AT_LEAST_ONCE, _, _))
-        .Times(1)
-        .WillOnce(DoAll(InvokeArgument<3>(0), SaveArg<2>(&startNextAcceptedResponse), Return(true)));
-
-    EXPECT_CALL(
-        *mockClient,
-        SubscribeToStartNextPendingJobExecutionRejected(ThingNameEq(ThingName), AWS_MQTT_QOS_AT_LEAST_ONCE, _, _))
-        .Times(1)
-        .WillOnce(InvokeSubAck(0));
-    EXPECT_CALL(
-        *mockClient, SubscribeToNextJobExecutionChangedEvents(ThingNameEq(ThingName), AWS_MQTT_QOS_AT_LEAST_ONCE, _, _))
-        .Times(1)
-        .WillOnce(InvokeSubAck(0));
-    EXPECT_CALL(
-        *mockClient, SubscribeToUpdateJobExecutionAccepted(ThingNameEq(ThingName), AWS_MQTT_QOS_AT_LEAST_ONCE, _, _))
-        .Times(1)
-        .WillOnce(InvokeSubAck(0));
-    EXPECT_CALL(
-        *mockClient, SubscribeToUpdateJobExecutionRejected(ThingNameEq(ThingName), AWS_MQTT_QOS_AT_LEAST_ONCE, _, _))
-        .Times(1)
-        .WillOnce(InvokeSubAck(0));
-    EXPECT_CALL(*mockClient, PublishStartNextPendingJobExecution(ThingNameEq(ThingName), AWS_MQTT_QOS_AT_LEAST_ONCE, _))
-        .Times(1)
-        .WillOnce(InvokeArgument<2>(0));
-
+    std::function<void()> terminalCompletion;
+    EXPECT_CALL(*jobsMock, createJobEngine()).Times(0);
     EXPECT_CALL(
         *jobsMock,
         publishUpdateJobExecutionStatusWithRetry(
             JobExecutionEq(job),
-            StatusInfoEq(JobsFeature::JobExecutionStatusInfo(Iotjobs::JobStatus::IN_PROGRESS, "", "", "")),
-            IsEmpty(),
-            IsNull()))
-        .Times(1);
-    EXPECT_CALL(
-        *jobsMock,
-        publishUpdateJobExecutionStatusWithRetry(
-            JobExecutionEq(job),
-            StatusInfoEq(JobsFeature::JobExecutionStatusInfo(Iotjobs::JobStatus::SUCCEEDED, "", stdoutput, "")),
+            StatusInfoEq(JobsFeature::JobExecutionStatusInfo(
+                Iotjobs::JobStatus::REJECTED, "Unable to execute job, invalid job document provided!", "", "")),
             _,
             _))
-        .WillOnce(InvokeWithoutArgs(setPromise));
+        .Times(1)
+        .WillOnce(SaveArg<3>(&terminalCompletion));
 
     jobsMock->init(std::shared_ptr<Mqtt::MqttConnection>(), notifier, config);
     jobsMock->invokeRunJobs();
     ASSERT_TRUE(startNextAcceptedResponse);
-    startNextAcceptedResponse(startNextJobExecutionResponse.get(), 0);
-    startNextAcceptedResponse(startNextJobExecutionResponse.get(), 0);
+    ASSERT_TRUE(nextJobChangedResponse);
 
-    EXPECT_EQ(std::future_status::ready, promise.get_future().wait_for(std::chrono::seconds(3)));
+    startNextJobExecutionResponse->Execution = Aws::Crt::Optional<JobExecutionData>(job);
+    NextJobExecutionChangedEvent nextJobEvent;
+    nextJobEvent.Execution = Aws::Crt::Optional<JobExecutionData>(job);
+    std::promise<void> invokeCallbacks;
+    auto invokeCallbacksFuture = invokeCallbacks.get_future().share();
+    std::thread startNextThread([&]() {
+        invokeCallbacksFuture.wait();
+        startNextAcceptedResponse(startNextJobExecutionResponse.get(), 0);
+    });
+    std::thread nextChangedThread([&]() {
+        invokeCallbacksFuture.wait();
+        nextJobChangedResponse(&nextJobEvent, 0);
+    });
+
+    invokeCallbacks.set_value();
+    startNextThread.join();
+    nextChangedThread.join();
+
+    ASSERT_TRUE(terminalCompletion);
+    terminalCompletion();
+}
+
+TEST_F(TestJobsFeature, DuplicateExecutionWithChangedDocumentIsIgnoredAfterCompletion)
+{
+    JobExecutionData job = getSampleJobExecution("job1", 1);
+    job.JobDocument = Aws::Crt::Optional<JsonObject>(
+        JsonObject(R"({"version":"1.0","deliveryVariant":"original"})"));
+    JobExecutionData duplicateJob = getSampleJobExecution("job1", 1);
+    duplicateJob.JobDocument = Aws::Crt::Optional<JsonObject>(
+        JsonObject(R"({"version":"1.0","deliveryVariant":"changed"})"));
+    ASSERT_STRNE(
+        job.JobDocument->View().WriteCompact().c_str(),
+        duplicateJob.JobDocument->View().WriteCompact().c_str());
+
+    Iotjobs::OnSubscribeToStartNextPendingJobExecutionAcceptedResponse startNextAcceptedResponse;
+    expectSuccessfulJobsStartup(*jobsMock, mockClient, ThingName, &startNextAcceptedResponse);
+
+    std::function<void()> terminalCompletion;
+    EXPECT_CALL(*jobsMock, createJobEngine()).Times(0);
+    EXPECT_CALL(
+        *jobsMock,
+        publishUpdateJobExecutionStatusWithRetry(
+            JobExecutionEq(job),
+            StatusInfoEq(JobsFeature::JobExecutionStatusInfo(
+                Iotjobs::JobStatus::REJECTED, "Unable to execute job, invalid job document provided!", "", "")),
+            _,
+            _))
+        .Times(1)
+        .WillOnce(SaveArg<3>(&terminalCompletion));
+
+    jobsMock->init(std::shared_ptr<Mqtt::MqttConnection>(), notifier, config);
+    jobsMock->invokeRunJobs();
+    ASSERT_TRUE(startNextAcceptedResponse);
+
+    startNextJobExecutionResponse->Execution = Aws::Crt::Optional<JobExecutionData>(job);
+    startNextAcceptedResponse(startNextJobExecutionResponse.get(), 0);
+    ASSERT_TRUE(terminalCompletion);
+    terminalCompletion();
+
+    startNextJobExecutionResponse->Execution = Aws::Crt::Optional<JobExecutionData>(duplicateJob);
+    startNextAcceptedResponse(startNextJobExecutionResponse.get(), 0);
 }
 
 TEST_F(TestJobsFeature, InvalidJobDocument)
