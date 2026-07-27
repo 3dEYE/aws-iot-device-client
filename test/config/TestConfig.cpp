@@ -1690,6 +1690,41 @@ TEST_F(ConfigTestFixture, HTTPProxyConfigHappy)
     ASSERT_STREQ("12345", httpProxyConfig.proxyPassword->c_str());
 }
 
+TEST_F(ConfigTestFixture, HTTPProxyConfigDoesNotBypassMqttValidation)
+{
+    const string configPath = "/tmp/aws-iot-device-client-test-config";
+    const string proxyConfigPath = "/tmp/aws-iot-device-client-test-proxy-config";
+    constexpr char configJson[] = R"(
+{
+  "endpoint": "endpoint value",
+  "cert": "/tmp/aws-iot-device-client-test-file",
+  "key": "/tmp/aws-iot-device-client-test-file",
+  "thing-name": "thing-name value"
+})";
+    constexpr char proxyConfigJson[] = R"(
+{
+  "http-proxy-enabled": true,
+  "http-proxy-host": "10.0.0.1",
+  "http-proxy-port": "8888",
+  "http-proxy-auth-method": "None"
+})";
+
+    FileUtils::StoreValueInFile(configJson, configPath);
+    FileUtils::StoreValueInFile(proxyConfigJson, proxyConfigPath);
+
+    CliArgs cliArgs{
+        {Config::CLI_CONFIG_FILE, configPath},
+        {PlainConfig::HttpProxyConfig::CLI_HTTP_PROXY_CONFIG_PATH, proxyConfigPath},
+        {PlainConfig::CLI_MQTT_KEEP_ALIVE_SECONDS, "29"},
+    };
+
+    Config config;
+    ASSERT_FALSE(config.init(cliArgs));
+
+    std::remove(configPath.c_str());
+    std::remove(proxyConfigPath.c_str());
+}
+
 TEST_F(ConfigTestFixture, HTTPProxyConfigDisabled)
 {
     constexpr char jsonString[] = R"(

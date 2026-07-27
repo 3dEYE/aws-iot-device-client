@@ -2790,7 +2790,7 @@ bool Config::init(const CliArgs &cliArgs)
                 TAG,
                 "Successfully fetched http proxy config file '%s' and validated its content.",
                 config.httpProxyConfig.proxyConfigPath->c_str());
-            return true;
+            return config.Validate();
         }
 #endif
 
