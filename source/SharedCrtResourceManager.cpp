@@ -480,7 +480,8 @@ int SharedCrtResourceManager::establishConnection(const PlainConfig &config)
         LOG_ERROR(TAG, "Device Client is not able to set reconnection settings. Device Client will retry again.");
         return RETRY;
     }
-    if (!connection->Connect(config.thingName->c_str(), false))
+    if (!connection->Connect(
+            config.thingName->c_str(), false, config.mqttKeepAliveSeconds, config.mqttPingTimeoutMs))
     {
         LOGM_ERROR(TAG, "MQTT Connection failed with error: %s", ErrorDebugString(connection->LastError()));
         return RETRY;

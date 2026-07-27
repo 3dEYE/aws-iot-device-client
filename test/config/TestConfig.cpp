@@ -301,7 +301,43 @@ TEST_F(ConfigTestFixture, HappyCaseMinimumCli)
     ASSERT_STREQ(filePath.c_str(), config.cert->c_str());
     ASSERT_STREQ(filePath.c_str(), config.key->c_str());
     ASSERT_STREQ("thing-name value", config.thingName->c_str());
+    ASSERT_EQ(0, config.mqttKeepAliveSeconds);
+    ASSERT_EQ(0, config.mqttPingTimeoutMs);
     AssertDefaultFeaturesEnabled(config);
+}
+
+TEST_F(ConfigTestFixture, MqttKeepAliveCliOverrides)
+{
+    auto cliArgs = makeMinimumCliArgs();
+    cliArgs[PlainConfig::CLI_MQTT_KEEP_ALIVE_SECONDS] = "30";
+    cliArgs[PlainConfig::CLI_MQTT_PING_TIMEOUT_MS] = "15000";
+
+    PlainConfig config;
+    ASSERT_TRUE(config.LoadFromCliArgs(cliArgs));
+    ASSERT_TRUE(config.Validate());
+    ASSERT_EQ(30, config.mqttKeepAliveSeconds);
+    ASSERT_EQ(15000, config.mqttPingTimeoutMs);
+}
+
+TEST_F(ConfigTestFixture, MqttKeepAliveCliRejectsInvalidValues)
+{
+    auto invalidNumberArgs = makeMinimumCliArgs();
+    invalidNumberArgs[PlainConfig::CLI_MQTT_KEEP_ALIVE_SECONDS] = "invalid";
+    PlainConfig invalidNumberConfig;
+    ASSERT_FALSE(invalidNumberConfig.LoadFromCliArgs(invalidNumberArgs));
+
+    auto shortKeepAliveArgs = makeMinimumCliArgs();
+    shortKeepAliveArgs[PlainConfig::CLI_MQTT_KEEP_ALIVE_SECONDS] = "29";
+    PlainConfig shortKeepAliveConfig;
+    ASSERT_TRUE(shortKeepAliveConfig.LoadFromCliArgs(shortKeepAliveArgs));
+    ASSERT_FALSE(shortKeepAliveConfig.Validate());
+
+    auto longPingTimeoutArgs = makeMinimumCliArgs();
+    longPingTimeoutArgs[PlainConfig::CLI_MQTT_KEEP_ALIVE_SECONDS] = "30";
+    longPingTimeoutArgs[PlainConfig::CLI_MQTT_PING_TIMEOUT_MS] = "30000";
+    PlainConfig longPingTimeoutConfig;
+    ASSERT_TRUE(longPingTimeoutConfig.LoadFromCliArgs(longPingTimeoutArgs));
+    ASSERT_FALSE(longPingTimeoutConfig.Validate());
 }
 
 TEST_F(ConfigTestFixture, ExtractExpandedPathFailureCLI)
@@ -1652,6 +1688,41 @@ TEST_F(ConfigTestFixture, HTTPProxyConfigHappy)
     ASSERT_STREQ("UserNameAndPassword", httpProxyConfig.proxyAuthMethod->c_str());
     ASSERT_STREQ("testUserName", httpProxyConfig.proxyUsername->c_str());
     ASSERT_STREQ("12345", httpProxyConfig.proxyPassword->c_str());
+}
+
+TEST_F(ConfigTestFixture, HTTPProxyConfigDoesNotBypassMqttValidation)
+{
+    const string configPath = "/tmp/aws-iot-device-client-test-config";
+    const string proxyConfigPath = "/tmp/aws-iot-device-client-test-proxy-config";
+    constexpr char configJson[] = R"(
+{
+  "endpoint": "endpoint value",
+  "cert": "/tmp/aws-iot-device-client-test-file",
+  "key": "/tmp/aws-iot-device-client-test-file",
+  "thing-name": "thing-name value"
+})";
+    constexpr char proxyConfigJson[] = R"(
+{
+  "http-proxy-enabled": true,
+  "http-proxy-host": "10.0.0.1",
+  "http-proxy-port": "8888",
+  "http-proxy-auth-method": "None"
+})";
+
+    FileUtils::StoreValueInFile(configJson, configPath);
+    FileUtils::StoreValueInFile(proxyConfigJson, proxyConfigPath);
+
+    CliArgs cliArgs{
+        {Config::CLI_CONFIG_FILE, configPath},
+        {PlainConfig::HttpProxyConfig::CLI_HTTP_PROXY_CONFIG_PATH, proxyConfigPath},
+        {PlainConfig::CLI_MQTT_KEEP_ALIVE_SECONDS, "29"},
+    };
+
+    Config config;
+    ASSERT_FALSE(config.init(cliArgs));
+
+    std::remove(configPath.c_str());
+    std::remove(proxyConfigPath.c_str());
 }
 
 TEST_F(ConfigTestFixture, HTTPProxyConfigDisabled)

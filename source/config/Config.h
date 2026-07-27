@@ -78,6 +78,8 @@ namespace Aws
                 static constexpr char CLI_KEY[] = "--key";
                 static constexpr char CLI_ROOT_CA[] = "--root-ca";
                 static constexpr char CLI_THING_NAME[] = "--thing-name";
+                static constexpr char CLI_MQTT_KEEP_ALIVE_SECONDS[] = "--mqtt-keep-alive-seconds";
+                static constexpr char CLI_MQTT_PING_TIMEOUT_MS[] = "--mqtt-ping-timeout-ms";
 
                 static constexpr char JSON_KEY_ENDPOINT[] = "endpoint";
                 static constexpr char JSON_KEY_CERT[] = "cert";
@@ -107,6 +109,8 @@ namespace Aws
                 Aws::Crt::Optional<std::string> key;
                 Aws::Crt::Optional<std::string> rootCa;
                 Aws::Crt::Optional<std::string> thingName;
+                uint16_t mqttKeepAliveSeconds{0};
+                uint32_t mqttPingTimeoutMs{0};
 
                 std::string lockFilePath{DEFAULT_LOCK_FILE_PATH};
 
