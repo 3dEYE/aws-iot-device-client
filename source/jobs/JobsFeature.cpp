@@ -843,14 +843,9 @@ void JobsFeature::handleJob(const JobExecutionData &job)
 bool JobsFeature::tryStartJob(const JobExecutionData &job)
 {
     unique_lock<mutex> notificationLock(latestJobsNotificationLock);
-    const bool sameJobExecution =
-        latestJobsNotification.JobId.has_value() && latestJobsNotification.ExecutionNumber.has_value() &&
+    if (latestJobsNotification.JobId.has_value() && latestJobsNotification.ExecutionNumber.has_value() &&
         job.JobId.value() == latestJobsNotification.JobId.value() &&
-        job.ExecutionNumber.value() == latestJobsNotification.ExecutionNumber.value();
-    const bool hasDistinctQueuedAt =
-        latestJobsNotification.QueuedAt.has_value() && job.QueuedAt.has_value() &&
-        latestJobsNotification.QueuedAt.value().Millis() != job.QueuedAt.value().Millis();
-    if (sameJobExecution && !hasDistinctQueuedAt)
+        job.ExecutionNumber.value() == latestJobsNotification.ExecutionNumber.value())
     {
         LOG_DEBUG(TAG, "Encountered a duplicate job notification");
         return false;
@@ -859,7 +854,6 @@ bool JobsFeature::tryStartJob(const JobExecutionData &job)
     handlingJob.store(true);
     latestJobsNotification.JobId = job.JobId.value();
     latestJobsNotification.ExecutionNumber = job.ExecutionNumber.value();
-    latestJobsNotification.QueuedAt = job.QueuedAt;
     return true;
 }
 

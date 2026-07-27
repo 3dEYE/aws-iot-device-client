@@ -13,6 +13,17 @@ separate recovery-state mutex.
 Jobs startup calls `Subscribe*` without the lifecycle mutex. `stop()` signals
 its worker, cancels the startup waits, and joins the worker.
 
+## Jobs notification deduplication identity
+
+Jobs deduplicates the latest notification by `(jobId, executionNumber)`. This
+suppresses duplicate delivery of the same execution from the StartNext response
+and next-job-changed notification paths; it is not a persistent exactly-once
+execution history.
+
+The same pair is assumed not to be reused after deleting a job or job execution
+while the Device Client process remains running. Supporting identifier reuse
+after deletion is outside this deduplication scope.
+
 ## Feature registry lifecycle serialization
 
 `FeatureRegistry::startAll()` and `FeatureRegistry::stopAll()` hold
