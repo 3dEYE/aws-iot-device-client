@@ -1780,6 +1780,8 @@ TEST_F(TestJobsFeature, ConcurrentDuplicateNotificationsExecuteOnce)
 {
     JobExecutionData job = getSampleJobExecution("job1", 1);
     job.JobDocument = Aws::Crt::Optional<JsonObject>(JsonObject(R"({"version":"1.0"})"));
+    job.QueuedAt =
+        Aws::Crt::Optional<DateTime>(DateTime(static_cast<uint64_t>(1000)));
     Iotjobs::OnSubscribeToStartNextPendingJobExecutionAcceptedResponse startNextAcceptedResponse;
     Iotjobs::OnSubscribeToNextJobExecutionChangedEventsResponse nextJobChangedResponse;
     expectSuccessfulJobsStartup(
@@ -1825,11 +1827,13 @@ TEST_F(TestJobsFeature, ConcurrentDuplicateNotificationsExecuteOnce)
     terminalCompletion();
 }
 
-TEST_F(TestJobsFeature, DuplicateExecutionWithChangedDocumentIsIgnoredAfterCompletion)
+TEST_F(TestJobsFeature, DuplicateExecutionWithChangedDocumentAndMissingQueuedAtIsIgnoredAfterCompletion)
 {
     JobExecutionData job = getSampleJobExecution("job1", 1);
     job.JobDocument = Aws::Crt::Optional<JsonObject>(
         JsonObject(R"({"version":"1.0","deliveryVariant":"original"})"));
+    job.QueuedAt =
+        Aws::Crt::Optional<DateTime>(DateTime(static_cast<uint64_t>(1000)));
     JobExecutionData duplicateJob = getSampleJobExecution("job1", 1);
     duplicateJob.JobDocument = Aws::Crt::Optional<JsonObject>(
         JsonObject(R"({"version":"1.0","deliveryVariant":"changed"})"));
@@ -1864,6 +1868,50 @@ TEST_F(TestJobsFeature, DuplicateExecutionWithChangedDocumentIsIgnoredAfterCompl
 
     startNextJobExecutionResponse->Execution = Aws::Crt::Optional<JobExecutionData>(duplicateJob);
     startNextAcceptedResponse(startNextJobExecutionResponse.get(), 0);
+}
+
+TEST_F(TestJobsFeature, ReusedExecutionIdentityWithDifferentQueuedAtExecutesAgain)
+{
+    JobExecutionData firstJob = getSampleJobExecution("job1", 1);
+    firstJob.JobDocument = Aws::Crt::Optional<JsonObject>(JsonObject(R"({"version":"1.0"})"));
+    firstJob.QueuedAt =
+        Aws::Crt::Optional<DateTime>(DateTime(static_cast<uint64_t>(1000)));
+    JobExecutionData reusedJob = getSampleJobExecution("job1", 1);
+    reusedJob.JobDocument = Aws::Crt::Optional<JsonObject>(JsonObject(R"({"version":"1.0"})"));
+    reusedJob.QueuedAt =
+        Aws::Crt::Optional<DateTime>(DateTime(static_cast<uint64_t>(1500)));
+
+    Iotjobs::OnSubscribeToStartNextPendingJobExecutionAcceptedResponse startNextAcceptedResponse;
+    expectSuccessfulJobsStartup(*jobsMock, mockClient, ThingName, &startNextAcceptedResponse);
+
+    std::function<void()> firstTerminalCompletion;
+    std::function<void()> secondTerminalCompletion;
+    EXPECT_CALL(*jobsMock, createJobEngine()).Times(0);
+    EXPECT_CALL(
+        *jobsMock,
+        publishUpdateJobExecutionStatusWithRetry(
+            JobExecutionEq(firstJob),
+            StatusInfoEq(JobsFeature::JobExecutionStatusInfo(
+                Iotjobs::JobStatus::REJECTED, "Unable to execute job, invalid job document provided!", "", "")),
+            _,
+            _))
+        .Times(2)
+        .WillOnce(SaveArg<3>(&firstTerminalCompletion))
+        .WillOnce(SaveArg<3>(&secondTerminalCompletion));
+
+    jobsMock->init(std::shared_ptr<Mqtt::MqttConnection>(), notifier, config);
+    jobsMock->invokeRunJobs();
+    ASSERT_TRUE(startNextAcceptedResponse);
+
+    startNextJobExecutionResponse->Execution = Aws::Crt::Optional<JobExecutionData>(firstJob);
+    startNextAcceptedResponse(startNextJobExecutionResponse.get(), 0);
+    ASSERT_TRUE(firstTerminalCompletion);
+    firstTerminalCompletion();
+
+    startNextJobExecutionResponse->Execution = Aws::Crt::Optional<JobExecutionData>(reusedJob);
+    startNextAcceptedResponse(startNextJobExecutionResponse.get(), 0);
+    ASSERT_TRUE(secondTerminalCompletion);
+    secondTerminalCompletion();
 }
 
 TEST_F(TestJobsFeature, InvalidJobDocument)

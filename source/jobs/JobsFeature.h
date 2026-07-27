@@ -170,7 +170,7 @@ namespace Aws
                         updateJobExecutionPromises;
 
                     std::mutex latestJobsNotificationLock;
-                    // Only JobId and ExecutionNumber are populated; substituted document content is not identity.
+                    // Only deduplication fields are populated; substituted document content is not identity.
                     Aws::Iotjobs::JobExecutionData latestJobsNotification;
 
                     /**
