@@ -13,10 +13,10 @@ To retrieve the current installed version of Device Client, use the --version ar
 ```
 
 The components of the version are derived at build time from the [CMakeLists.versioning](../CMakeLists.txt.versioning) script in the repo. This script is invoked from the toplevel CMakeLists.txt file used to build the software. The logic for obtaining each component of the version is described below:
-* `MAJOR.MINOR` is derived from the prior tag associated with the current commit in the repository.
-    * Equivalent to the output from `git describe --abbrev=0 --tags --match "v[0-9]*"`.
-* `PATCH` is derived by counting the number of commits from the tag obtained for `MAJOR.MINOR`.
-    * Equivalent to the output from `git rev-list origin/main MAJOR.MINOR..HEAD --count`.
+* `MAJOR.MINOR` is derived from the nearest reachable numeric version tag whose complete name is `vMAJOR.MINOR` or `vMAJOR.MINOR.PATCH`.
+    * Generated release tags such as `v1.9.12-abcdef0` are ignored so they cannot reset the next patch number.
+* `PATCH` starts at zero when a reachable `vMAJOR.MINOR` line base exists, or at the patch from the nearest reachable `vMAJOR.MINOR.PATCH` tag when no bare base exists, then adds the commits since that base.
+    * The commits-ahead portion is equivalent to `git rev-list <line-base-tag>..HEAD --count`.
 * `COMMIT` is derived by obtaining the short sha of the current commit.
     * Equivalent to the output from `git rev-parse --short HEAD`.
 

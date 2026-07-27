@@ -33,26 +33,42 @@ trap restore_version EXIT
 # The project forces USE_OPENSSL=ON, so aws-lc is unused.
 git config --global submodule.crt/aws-lc.update none
 
+find_version_line_tag() {
+    local tag
+    local tags
+    local -a match_args=()
+
+    tags="$(git tag --list 'v[0-9]*')" || return 1
+    while IFS= read -r tag; do
+        if [[ "$tag" =~ ^v[0-9]+\.[0-9]+(\.[0-9]+)?$ ]]; then
+            match_args+=(--match "$tag")
+        fi
+    done <<<"$tags"
+
+    if (( ${#match_args[@]} == 0 )); then
+        return 1
+    fi
+
+    git describe --abbrev=0 --tags "${match_args[@]}"
+}
+
 prepare_git_metadata() {
     local version_tag
 
     if [[ "$(git rev-parse --is-shallow-repository)" == "true" ]]; then
         git fetch --force --unshallow --tags
-    elif ! git describe \
-        --abbrev=0 --tags --match 'v[0-9]*' >/dev/null 2>&1; then
+    elif ! find_version_line_tag >/dev/null 2>&1; then
         git fetch --force --tags
     fi
 
-    if ! version_tag="$(
-        git describe --abbrev=0 --tags --match 'v[0-9]*' 2>/dev/null
-    )"; then
+    if ! version_tag="$(find_version_line_tag 2>/dev/null)"; then
         printf '%s\n' \
-            'Unable to find a reachable version tag matching v[0-9]*.' \
+            'Unable to find a reachable numeric version tag.' \
             'Fetch the repository history and tags before configuring.' >&2
         return 1
     fi
 
-    printf 'Using version tag %s.\n' "$version_tag"
+    printf 'Using version line selected by %s.\n' "$version_tag"
 }
 
 configure() {
@@ -69,6 +85,10 @@ configure() {
         -DCMAKE_C_COMPILER_LAUNCHER=ccache \
         -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
         -DCMAKE_CXX_FLAGS=-Wno-error=ignored-attributes
+}
+
+test_versioning() {
+    bash .github/ci/test-versioning.sh
 }
 
 build_targets() {
@@ -117,11 +137,13 @@ run_tests() {
 
 case "$mode" in
     all)
+        test_versioning
         configure
         build_targets
         run_tests
         ;;
     build)
+        test_versioning
         configure
         build_targets
         ;;

@@ -17,6 +17,13 @@
 - Restore `.version` before reporting final Git status, even after a failed
   build.
 
+## Review context
+
+- Before reviewing an implementation area, check `docs/implementation-notes.md`
+  for relevant context, intentional invariants, and dependency-specific
+  assumptions. Revalidate a note when the code or dependency pins it names
+  change.
+
 ## Build environment
 
 - In Codex Cloud, use the preconfigured x64 `build` tree with the commands

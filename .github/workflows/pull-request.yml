@@ -25,17 +25,17 @@ jobs:
         include:
           - architecture: x64
             mode: native
-            runner: ubuntu-24.04
+            runner: ubuntu-22.04
             job_name: Build and test x64
             step_name: Build and test
           - architecture: arm64
             mode: native
-            runner: ubuntu-24.04-arm
+            runner: ubuntu-22.04-arm
             job_name: Build and test ARM64
             step_name: Build and test
           - architecture: arm32
             mode: cross
-            runner: ubuntu-24.04
+            runner: ubuntu-22.04
             job_name: Cross-build ARM32
             step_name: Cross-build and inspect
 
@@ -52,6 +52,11 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+
+      - name: Test release version derivation
+        if: matrix.architecture == 'x64' && matrix.mode == 'native'
+        shell: bash
+        run: bash .github/ci/test-versioning.sh
 
       - name: Read pinned SDK revision
         id: sdk-pin
@@ -98,7 +103,7 @@ jobs:
         with:
           path: .ci-cache/cross-openssl
           key: >-
-            cross-openssl-${{ runner.os }}-${{ matrix.architecture }}-3.5.7-${{
+            cross-openssl-${{ matrix.runner }}-${{ matrix.architecture }}-3.5.7-${{
             hashFiles(
               '.github/ci/build-and-test.sh',
               'cmake-toolchain/Toolchain-armhf.cmake',
@@ -108,9 +113,9 @@ jobs:
       - name: Restore compiler cache
         uses: hendrikmuhs/ccache-action@d62db5f07c26379fc4b4e0916f098a92573c3b03  # v1.2.23
         with:
-          key: ${{ matrix.architecture }}-${{ matrix.mode }}-ubuntu24-sdk-${{ steps.sdk-pin.outputs.commit }}
+          key: ${{ matrix.architecture }}-${{ matrix.mode }}-${{ matrix.runner }}-sdk-${{ steps.sdk-pin.outputs.commit }}
           restore-keys: |
-            ${{ matrix.architecture }}-${{ matrix.mode }}-ubuntu24-sdk-
+            ${{ matrix.architecture }}-${{ matrix.mode }}-${{ matrix.runner }}-sdk-
           install: binary
           max-size: 500M
 
@@ -120,3 +125,4 @@ jobs:
           .github/ci/build-and-test.sh
           "${{ matrix.architecture }}"
           "${{ matrix.mode }}"
+          Release

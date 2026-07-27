@@ -21,7 +21,6 @@ permissions:
 
 env:
   PACKAGE_NAME: aws-iot-device-client
-  LOCAL_BUILD_IMAGE: aws-iot-device-client-release-builder:local
   SOURCE_REF: ${{ inputs.release_branch || github.ref_name }}
 
 jobs:
@@ -33,7 +32,7 @@ jobs:
       sha: ${{ steps.revision.outputs.sha }}
     steps:
       - name: Checkout release branch
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           ref: ${{ env.SOURCE_REF }}
           fetch-depth: 0
@@ -43,6 +42,17 @@ jobs:
         id: revision
         shell: bash
         run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Validate release source
+        if: ${{ inputs.dry_run == 'false' }}
+        env:
+          RELEASE_BRANCH: ${{ env.SOURCE_REF }}
+        shell: bash
+        run: |
+          if [[ "$RELEASE_BRANCH" != "dev" ]]; then
+            echo "Releases may only be created from the dev branch; use dry_run for other branches." >&2
+            exit 1
+          fi
 
       - name: Generate version from release revision
         id: version
@@ -70,50 +80,111 @@ jobs:
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
   build:
-    name: Build ${{ matrix.architecture }} binary
-    runs-on: ubuntu-latest
+    name: Build and validate ${{ matrix.architecture }} release binary
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
     needs: version
     strategy:
       fail-fast: false
       matrix:
         include:
           - architecture: x64
-            build_args: --compile-mode=native_bundled_sdk_mode
-            binary_path: build/aws-iot-device-client
+            mode: native
+            runner: ubuntu-22.04
+            binary_path: build/x64/aws-iot-device-client
             asset_name: aws-iot-device-client-linux-x64
-          - architecture: arm32
-            build_args: --compile-mode=armhf_cross_mode
-            binary_path: build/aws-iot-device-client
-            asset_name: aws-iot-device-client-linux-arm32
           - architecture: arm64
-            build_args: --compile-mode=aarch64_cross_mode
-            binary_path: build/aws-iot-device-client
+            mode: native
+            runner: ubuntu-22.04-arm
+            binary_path: build/arm64-native/aws-iot-device-client
             asset_name: aws-iot-device-client-linux-arm64
+          - architecture: arm32
+            mode: cross
+            runner: ubuntu-22.04
+            binary_path: build/arm32/aws-iot-device-client
+            asset_name: aws-iot-device-client-linux-arm32
+    env:
+      AWS_IOT_DEVICE_SDK_CACHE_DIR: ${{ github.workspace }}/.ci-cache/aws-iot-device-sdk-cpp-v2
+      CROSS_OPENSSL_CACHE_DIR: ${{ github.workspace }}/.ci-cache/cross-openssl
+      CCACHE_BASEDIR: ${{ github.workspace }}
+      CCACHE_COMPILERCHECK: content
+      CCACHE_NOHASHDIR: "true"
     steps:
       - name: Checkout release revision
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           ref: ${{ needs.version.outputs.sha }}
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Build binary
-        env:
-          RELEASE_BRANCH: ${{ env.SOURCE_REF }}
+      - name: Read pinned SDK revision
+        id: sdk-pin
         shell: bash
         run: |
-          set -euo pipefail
+          sdk_commit="$(
+            sed -n \
+              's/^set(AWS_IOT_DEVICE_SDK_COMMIT \([0-9a-f]\{40\}\))$/\1/p' \
+              cmake/AwsIotDeviceSdkPins.cmake
+          )"
+          if [[ ! "$sdk_commit" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "Unable to read the pinned AWS IoT Device SDK commit" >&2
+            exit 1
+          fi
+          echo "commit=$sdk_commit" >> "$GITHUB_OUTPUT"
 
-          docker build \
-            --file .github/docker-images/base-images/device-client/ubuntu/Dockerfile \
-            --target base \
-            --tag "$LOCAL_BUILD_IMAGE" \
-            .
-          docker run \
-            --mount "type=bind,source=$(pwd),target=/root/${PACKAGE_NAME}" \
-            --env GITHUB_REF=refs/heads/${RELEASE_BRANCH} \
-            "$LOCAL_BUILD_IMAGE" \
-            ${{ matrix.build_args }}
+      - name: Restore pinned SDK source
+        id: sdk-cache
+        uses: actions/cache@v5
+        with:
+          path: .ci-cache/aws-iot-device-sdk-cpp-v2
+          key: aws-iot-device-sdk-source-v2-${{ steps.sdk-pin.outputs.commit }}
+
+      - name: Checkout pinned SDK source
+        if: steps.sdk-cache.outputs.cache-hit != 'true'
+        uses: actions/checkout@v6
+        with:
+          repository: aws/aws-iot-device-sdk-cpp-v2
+          ref: ${{ steps.sdk-pin.outputs.commit }}
+          path: .ci-cache/aws-iot-device-sdk-cpp-v2
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Prepare pinned SDK submodules
+        shell: bash
+        run: |
+          git config --global submodule.crt/aws-lc.update none
+          git -C "$AWS_IOT_DEVICE_SDK_CACHE_DIR" \
+            submodule update --init --recursive --force --depth 1
+
+      - name: Restore cross-compiled OpenSSL
+        if: matrix.mode == 'cross'
+        uses: actions/cache@v5
+        with:
+          path: .ci-cache/cross-openssl
+          key: >-
+            cross-openssl-${{ matrix.runner }}-${{ matrix.architecture }}-3.5.7-${{
+            hashFiles(
+              '.github/ci/build-and-test.sh',
+              'cmake-toolchain/Toolchain-armhf.cmake',
+              'cmake-toolchain/Toolchain-aarch64.cmake'
+            ) }}
+
+      - name: Restore compiler cache
+        uses: hendrikmuhs/ccache-action@d62db5f07c26379fc4b4e0916f098a92573c3b03  # v1.2.23
+        with:
+          key: ${{ matrix.architecture }}-${{ matrix.mode }}-${{ matrix.runner }}-sdk-${{ steps.sdk-pin.outputs.commit }}
+          restore-keys: |
+            ${{ matrix.architecture }}-${{ matrix.mode }}-${{ matrix.runner }}-sdk-
+          install: binary
+          max-size: 500M
+
+      - name: Build and test
+        shell: bash
+        run: >-
+          .github/ci/build-and-test.sh
+          "${{ matrix.architecture }}"
+          "${{ matrix.mode }}"
+          Release
 
       - name: Stage release asset
         shell: bash
@@ -121,9 +192,11 @@ jobs:
           set -euo pipefail
 
           mkdir -p release-assets
-          install -m 0755 "${{ matrix.binary_path }}" "release-assets/${{ matrix.asset_name }}"
+          install -m 0755 \
+            "${{ matrix.binary_path }}" \
+            "release-assets/${{ matrix.asset_name }}"
 
-      - name: Upload release asset artifact
+      - name: Upload release asset
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.asset_name }}
