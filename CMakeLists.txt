@@ -6,6 +6,7 @@ include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/AwsIotDeviceSdkPins.cmake")
 option(BUILD_SDK "Builds the aws-iot-device-sdk-cpp-v2 as part of build. Only do this if the SDK is not installed." ON)
 option(BUILD_TEST_DEPS "Builds the device client test dependencies as part of build. Only do this if you do not have gtest installed and you wish to run the tests." ON)
 option(BUILD_AWS_C_IOT_TESTS "Builds the aws-c-iot tests from the bundled SDK source." OFF)
+option(BUILD_AWS_C_MQTT_TESTS "Builds the aws-c-mqtt tests from the bundled SDK source." OFF)
 option(LINK_DL "Links the dlopen library with the Device Client." OFF)
 option(EXCLUDE_JOBS "Builds the device client without the IoT Jobs Feature." OFF)
 option(EXCLUDE_DD "Builds the device client without the IoT Device Defender Feature." OFF)
@@ -174,14 +175,22 @@ if (BUILD_SDK)
             "${CMAKE_CURRENT_SOURCE_DIR}/patches/aws-c-iot/0001-harden-secure-tunnel-reconnect.patch")
     set(AWS_C_IOT_PATCH_SCRIPT
             "${CMAKE_CURRENT_SOURCE_DIR}/patches/aws-c-iot/ApplyAwsCIotPatch.cmake")
+    set(AWS_C_MQTT_EXPECTED_COMMIT 5d198cf2d09b19bb18bf03e4425831a246d0a391)
+    set(AWS_C_MQTT_PATCH_FILE
+            "${CMAKE_CURRENT_SOURCE_DIR}/patches/aws-c-mqtt/0001-time-out-subscribe-operations.patch")
+    set(AWS_C_MQTT_PATCH_SCRIPT
+            "${CMAKE_CURRENT_SOURCE_DIR}/patches/aws-c-mqtt/ApplyAwsCMqttPatch.cmake")
     set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
             "${AWS_C_IOT_PATCH_FILE}"
-            "${AWS_C_IOT_PATCH_SCRIPT}")
+            "${AWS_C_IOT_PATCH_SCRIPT}"
+            "${AWS_C_MQTT_PATCH_FILE}"
+            "${AWS_C_MQTT_PATCH_SCRIPT}")
 
     # Download and unpack aws iot device sdk cpp v2 at configure time
     set(BUILD_DEPS ON CACHE BOOL "Build dependencies for the AWS SDK" FORCE)
     set(USE_OPENSSL ON CACHE BOOL "Use OpenSSL instead of aws-lc" FORCE)
     set(AWS_C_IOT_ALLOW_SOURCE_RESET OFF)
+    set(AWS_C_MQTT_ALLOW_SOURCE_RESET OFF)
     if (AWS_IOT_DEVICE_SDK_SOURCE_DIR)
         get_filename_component(AWS_IOT_DEVICE_SDK_SOURCE_PATH
                 "${AWS_IOT_DEVICE_SDK_SOURCE_DIR}" REALPATH
@@ -272,6 +281,41 @@ if (BUILD_SDK)
                             "${AWS_C_IOT_PRE_UPDATE_CLEAN_ERROR}")
                 endif ()
             endif ()
+
+            if (NOT "${AWS_IOT_DEVICE_SDK_ACTUAL_COMMIT}" STREQUAL
+                    "${AWS_IOT_DEVICE_SDK_COMMIT}"
+                    AND EXISTS
+                    "${AWS_IOT_DEVICE_SDK_SOURCE_PATH}/crt/aws-crt-cpp/crt/aws-c-mqtt/.git")
+                message(STATUS
+                        "Resetting managed aws-c-mqtt source before updating "
+                        "the AWS IoT Device SDK")
+                execute_process(
+                        COMMAND "${GIT_EXECUTABLE}" reset --hard HEAD
+                        WORKING_DIRECTORY
+                        "${AWS_IOT_DEVICE_SDK_SOURCE_PATH}/crt/aws-crt-cpp/crt/aws-c-mqtt"
+                        RESULT_VARIABLE AWS_C_MQTT_PRE_UPDATE_RESET_RESULT
+                        ERROR_VARIABLE AWS_C_MQTT_PRE_UPDATE_RESET_ERROR
+                        OUTPUT_QUIET)
+                if (NOT "${AWS_C_MQTT_PRE_UPDATE_RESET_RESULT}" STREQUAL "0")
+                    message(FATAL_ERROR
+                            "Unable to reset managed aws-c-mqtt before updating "
+                            "the AWS IoT Device SDK: "
+                            "${AWS_C_MQTT_PRE_UPDATE_RESET_ERROR}")
+                endif ()
+
+                execute_process(
+                        COMMAND "${GIT_EXECUTABLE}" clean -fdq
+                        WORKING_DIRECTORY
+                        "${AWS_IOT_DEVICE_SDK_SOURCE_PATH}/crt/aws-crt-cpp/crt/aws-c-mqtt"
+                        RESULT_VARIABLE AWS_C_MQTT_PRE_UPDATE_CLEAN_RESULT
+                        ERROR_VARIABLE AWS_C_MQTT_PRE_UPDATE_CLEAN_ERROR)
+                if (NOT "${AWS_C_MQTT_PRE_UPDATE_CLEAN_RESULT}" STREQUAL "0")
+                    message(FATAL_ERROR
+                            "Unable to clean managed aws-c-mqtt before updating "
+                            "the AWS IoT Device SDK: "
+                            "${AWS_C_MQTT_PRE_UPDATE_CLEAN_ERROR}")
+                endif ()
+            endif ()
         endif ()
 
         configure_file(CMakeLists.txt.awssdk
@@ -291,6 +335,7 @@ if (BUILD_SDK)
         endif ()
 
         set(AWS_C_IOT_ALLOW_SOURCE_RESET ON)
+        set(AWS_C_MQTT_ALLOW_SOURCE_RESET ON)
     endif ()
 
     execute_process(
@@ -303,6 +348,18 @@ if (BUILD_SDK)
             RESULT_VARIABLE AWS_C_IOT_PATCH_RESULT)
     if (NOT "${AWS_C_IOT_PATCH_RESULT}" STREQUAL "0")
         message(FATAL_ERROR "Failed to apply the Device Client aws-c-iot patch")
+    endif ()
+
+    execute_process(
+            COMMAND ${CMAKE_COMMAND}
+                    "-DAWS_C_MQTT_SOURCE_DIR=${AWS_IOT_DEVICE_SDK_SOURCE_PATH}/crt/aws-crt-cpp/crt/aws-c-mqtt"
+                    "-DAWS_C_MQTT_PATCH_FILE=${AWS_C_MQTT_PATCH_FILE}"
+                    "-DAWS_C_MQTT_EXPECTED_COMMIT=${AWS_C_MQTT_EXPECTED_COMMIT}"
+                    "-DAWS_C_MQTT_ALLOW_SOURCE_RESET=${AWS_C_MQTT_ALLOW_SOURCE_RESET}"
+                    -P "${AWS_C_MQTT_PATCH_SCRIPT}"
+            RESULT_VARIABLE AWS_C_MQTT_PATCH_RESULT)
+    if (NOT "${AWS_C_MQTT_PATCH_RESULT}" STREQUAL "0")
+        message(FATAL_ERROR "Failed to apply the Device Client aws-c-mqtt patch")
     endif ()
 
     # Add aws-iot-device-sdk-cpp-v2 directly to the build
@@ -319,10 +376,21 @@ if (BUILD_SDK)
                 "${CMAKE_BINARY_DIR}/aws-c-iot-tests")
         set(PROJECT_NAME "${AWS_IOT_DEVICE_CLIENT_PROJECT_NAME}")
     endif ()
+
+    if (BUILD_AWS_C_MQTT_TESTS)
+        list(APPEND CMAKE_MODULE_PATH
+                "${AWS_IOT_DEVICE_SDK_SOURCE_PATH}/crt/aws-crt-cpp/crt/aws-c-common/cmake")
+        set(AWS_IOT_DEVICE_CLIENT_PROJECT_NAME "${PROJECT_NAME}")
+        set(PROJECT_NAME aws-c-mqtt)
+        add_subdirectory(
+                "${AWS_IOT_DEVICE_SDK_SOURCE_PATH}/crt/aws-crt-cpp/crt/aws-c-mqtt/tests"
+                "${CMAKE_BINARY_DIR}/aws-c-mqtt-tests")
+        set(PROJECT_NAME "${AWS_IOT_DEVICE_CLIENT_PROJECT_NAME}")
+    endif ()
 else ()
     message(WARNING
             "BUILD_SDK=OFF uses the installed SDK as-is; "
-            "the Device Client aws-c-iot secure tunneling patch is not applied")
+            "the Device Client dependency patches are not applied")
     include_directories(/include)
     link_directories(/lib)
 endif ()

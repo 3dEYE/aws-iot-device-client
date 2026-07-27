@@ -56,6 +56,7 @@ configure() {
             -DBUILD_TESTING=ON \
             -DCMAKE_BUILD_TYPE=Debug \
             -DBUILD_AWS_C_IOT_TESTS=ON \
+            -DBUILD_AWS_C_MQTT_TESTS=ON \
             -DENABLE_NET_TESTS=ON \
             -DLINK_DL=ON \
             -DCMAKE_C_COMPILER_LAUNCHER=ccache \
@@ -70,6 +71,7 @@ build_targets() {
                 aws-iot-device-client \
                 test-aws-iot-device-client \
                 aws-c-iot-tests \
+                aws-c-mqtt-tests \
                 EventstreamRpc-cpp-tests \
                 IotDeviceDefender-cpp-tests \
             --parallel 2
@@ -83,6 +85,13 @@ run_tests() {
         --test-dir "${build_dir}/aws-c-iot-tests" \
         --output-on-failure \
         --parallel 2 \
+        --timeout 60 \
+        --no-tests=error
+
+    ctest \
+        --test-dir "${build_dir}/aws-c-mqtt-tests" \
+        --output-on-failure \
+        --tests-regex '^mqtt_connection_sub_timeout$' \
         --timeout 60 \
         --no-tests=error
 

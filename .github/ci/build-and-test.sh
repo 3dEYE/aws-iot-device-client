@@ -49,6 +49,7 @@ prepare_sdk_source() {
     local sdk_source_dir="${build_dir}/aws-iot-device-sdk-cpp-v2-src"
     local actual_commit
     local aws_c_iot_commit
+    local aws_c_mqtt_commit
     local invalid_submodules
 
     mkdir -p "$build_dir"
@@ -69,6 +70,14 @@ prepare_sdk_source() {
     git -C "${sdk_source_dir}/crt/aws-c-iot" \
         reset --hard "$aws_c_iot_commit" >/dev/null
     git -C "${sdk_source_dir}/crt/aws-c-iot" clean -fdq
+
+    aws_c_mqtt_commit="$(
+        git -C "${sdk_source_dir}/crt/aws-crt-cpp" \
+            rev-parse HEAD:crt/aws-c-mqtt
+    )"
+    git -C "${sdk_source_dir}/crt/aws-crt-cpp/crt/aws-c-mqtt" \
+        reset --hard "$aws_c_mqtt_commit" >/dev/null
+    git -C "${sdk_source_dir}/crt/aws-crt-cpp/crt/aws-c-mqtt" clean -fdq
 
     invalid_submodules="$(
         git -C "$sdk_source_dir" submodule status --recursive |
@@ -118,6 +127,7 @@ run_native() {
     configure_common "$build_dir" "$sdk_source_dir" \
         -DCMAKE_BUILD_TYPE="$build_type" \
         -DBUILD_AWS_C_IOT_TESTS=ON \
+        -DBUILD_AWS_C_MQTT_TESTS=ON \
         -DENABLE_NET_TESTS=ON \
         -DLINK_DL=ON
 
@@ -125,6 +135,7 @@ run_native() {
     cmake --build "$build_dir" \
         --target \
             aws-c-iot-tests \
+            aws-c-mqtt-tests \
             EventstreamRpc-cpp-tests \
             IotDeviceDefender-cpp-tests \
         --parallel 2
@@ -136,6 +147,13 @@ run_native() {
         --test-dir "${build_dir}/aws-c-iot-tests" \
         --output-on-failure \
         --parallel 2 \
+        --timeout 60 \
+        --no-tests=error
+
+    ctest \
+        --test-dir "${build_dir}/aws-c-mqtt-tests" \
+        --output-on-failure \
+        --tests-regex '^mqtt_connection_sub_timeout$' \
         --timeout 60 \
         --no-tests=error
 
@@ -287,6 +305,7 @@ run_cross() {
     configure_common "$build_dir" "$sdk_source_dir" \
         -DCMAKE_BUILD_TYPE=Release \
         -DBUILD_AWS_C_IOT_TESTS=ON \
+        -DBUILD_AWS_C_MQTT_TESTS=ON \
         -DENABLE_NET_TESTS=ON \
         -DAWS_IOT_DEVICE_CLIENT_OPENSSL_ROOT="$openssl_prefix" \
         -DOPENSSL_ROOT_DIR="$openssl_prefix" \
@@ -303,6 +322,7 @@ run_cross() {
     cmake --build "$build_dir" \
         --target \
             aws-c-iot-tests \
+            aws-c-mqtt-tests \
             EventstreamRpc-cpp-tests \
             IotDeviceDefender-cpp-tests \
         --parallel 2
