@@ -170,6 +170,7 @@ namespace Aws
                         updateJobExecutionPromises;
 
                     std::mutex latestJobsNotificationLock;
+                    // Only JobId and ExecutionNumber are populated; substituted document content is not identity.
                     Aws::Iotjobs::JobExecutionData latestJobsNotification;
 
                     /**
@@ -415,23 +416,19 @@ namespace Aws
                     void initJob(const Iotjobs::JobExecutionData &job);
 
                     /**
-                     * \brief Given a job notification, determines whether it's a duplicate message.
+                     * \brief Admits and initializes a job execution received from either Jobs notification path.
                      *
-                     * This method was originally intended to handle scenarios such as network instability
-                     * or loss where the jobs feature may receive multiple instances of the same message.
-                     * This allows us to eliminate duplicates that would otherwise cause the Jobs feature
-                     * to run the same job more than once.
-                     * @param job
-                     * @return true if it's a duplicate, false otherwise
+                     * @param job the job execution to handle
                      */
-                    bool isDuplicateNotification(Iotjobs::JobExecutionData job);
+                    void handleJob(const Iotjobs::JobExecutionData &job);
 
                     /**
-                     * \brief Stores information about a job notification
+                     * \brief Atomically records a job execution unless it duplicates the latest notification.
                      *
-                     * @param job
+                     * @param job the job execution to handle
+                     * @return true if the execution was accepted, false if it is a duplicate
                      */
-                    void copyJobsNotification(Iotjobs::JobExecutionData job);
+                    bool tryStartJob(const Iotjobs::JobExecutionData &job);
 
                     /**
                      * \brief virtual functions to facilitate injecting mocks for testing
