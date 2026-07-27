@@ -181,6 +181,7 @@ if (BUILD_SDK)
     # Download and unpack aws iot device sdk cpp v2 at configure time
     set(BUILD_DEPS ON CACHE BOOL "Build dependencies for the AWS SDK" FORCE)
     set(USE_OPENSSL ON CACHE BOOL "Use OpenSSL instead of aws-lc" FORCE)
+    set(AWS_C_IOT_ALLOW_SOURCE_RESET OFF)
     if (AWS_IOT_DEVICE_SDK_SOURCE_DIR)
         get_filename_component(AWS_IOT_DEVICE_SDK_SOURCE_PATH
                 "${AWS_IOT_DEVICE_SDK_SOURCE_DIR}" REALPATH
@@ -216,6 +217,63 @@ if (BUILD_SDK)
                 "Using pre-fetched AWS IoT Device SDK source at "
                 "${AWS_IOT_DEVICE_SDK_SOURCE_PATH}")
     else ()
+        set(AWS_IOT_DEVICE_SDK_SOURCE_PATH
+                "${CMAKE_BINARY_DIR}/aws-iot-device-sdk-cpp-v2-src")
+
+        # ExternalProject cannot stash changes inside a dirty submodule before
+        # switching SDK commits. Remove only our managed patch, and only when
+        # the cached SDK must move, so ordinary incremental configures remain
+        # untouched.
+        if (EXISTS "${AWS_IOT_DEVICE_SDK_SOURCE_PATH}/.git")
+            execute_process(
+                    COMMAND "${GIT_EXECUTABLE}" rev-parse HEAD
+                    WORKING_DIRECTORY "${AWS_IOT_DEVICE_SDK_SOURCE_PATH}"
+                    RESULT_VARIABLE AWS_IOT_DEVICE_SDK_REV_PARSE_RESULT
+                    OUTPUT_VARIABLE AWS_IOT_DEVICE_SDK_ACTUAL_COMMIT
+                    ERROR_VARIABLE AWS_IOT_DEVICE_SDK_REV_PARSE_ERROR
+                    OUTPUT_STRIP_TRAILING_WHITESPACE)
+            if (NOT "${AWS_IOT_DEVICE_SDK_REV_PARSE_RESULT}" STREQUAL "0")
+                message(FATAL_ERROR
+                        "Unable to inspect the managed AWS IoT Device SDK: "
+                        "${AWS_IOT_DEVICE_SDK_REV_PARSE_ERROR}")
+            endif ()
+
+            if (NOT "${AWS_IOT_DEVICE_SDK_ACTUAL_COMMIT}" STREQUAL
+                    "${AWS_IOT_DEVICE_SDK_COMMIT}"
+                    AND EXISTS
+                    "${AWS_IOT_DEVICE_SDK_SOURCE_PATH}/crt/aws-c-iot/.git")
+                message(STATUS
+                        "Resetting managed aws-c-iot source before updating "
+                        "the AWS IoT Device SDK")
+                execute_process(
+                        COMMAND "${GIT_EXECUTABLE}" reset --hard HEAD
+                        WORKING_DIRECTORY
+                        "${AWS_IOT_DEVICE_SDK_SOURCE_PATH}/crt/aws-c-iot"
+                        RESULT_VARIABLE AWS_C_IOT_PRE_UPDATE_RESET_RESULT
+                        ERROR_VARIABLE AWS_C_IOT_PRE_UPDATE_RESET_ERROR
+                        OUTPUT_QUIET)
+                if (NOT "${AWS_C_IOT_PRE_UPDATE_RESET_RESULT}" STREQUAL "0")
+                    message(FATAL_ERROR
+                            "Unable to reset managed aws-c-iot before updating "
+                            "the AWS IoT Device SDK: "
+                            "${AWS_C_IOT_PRE_UPDATE_RESET_ERROR}")
+                endif ()
+
+                execute_process(
+                        COMMAND "${GIT_EXECUTABLE}" clean -fdq
+                        WORKING_DIRECTORY
+                        "${AWS_IOT_DEVICE_SDK_SOURCE_PATH}/crt/aws-c-iot"
+                        RESULT_VARIABLE AWS_C_IOT_PRE_UPDATE_CLEAN_RESULT
+                        ERROR_VARIABLE AWS_C_IOT_PRE_UPDATE_CLEAN_ERROR)
+                if (NOT "${AWS_C_IOT_PRE_UPDATE_CLEAN_RESULT}" STREQUAL "0")
+                    message(FATAL_ERROR
+                            "Unable to clean managed aws-c-iot before updating "
+                            "the AWS IoT Device SDK: "
+                            "${AWS_C_IOT_PRE_UPDATE_CLEAN_ERROR}")
+                endif ()
+            endif ()
+        endif ()
+
         configure_file(CMakeLists.txt.awssdk
                 aws-iot-device-sdk-cpp-v2-download/CMakeLists.txt)
         execute_process(COMMAND ${CMAKE_COMMAND} -G "${CMAKE_GENERATOR}" .
@@ -232,8 +290,7 @@ if (BUILD_SDK)
             message(FATAL_ERROR "Failed to download the AWS IoT Device SDK")
         endif ()
 
-        set(AWS_IOT_DEVICE_SDK_SOURCE_PATH
-                "${CMAKE_BINARY_DIR}/aws-iot-device-sdk-cpp-v2-src")
+        set(AWS_C_IOT_ALLOW_SOURCE_RESET ON)
     endif ()
 
     execute_process(
@@ -241,6 +298,7 @@ if (BUILD_SDK)
                     "-DAWS_C_IOT_SOURCE_DIR=${AWS_IOT_DEVICE_SDK_SOURCE_PATH}/crt/aws-c-iot"
                     "-DAWS_C_IOT_PATCH_FILE=${AWS_C_IOT_PATCH_FILE}"
                     "-DAWS_C_IOT_EXPECTED_COMMIT=${AWS_C_IOT_EXPECTED_COMMIT}"
+                    "-DAWS_C_IOT_ALLOW_SOURCE_RESET=${AWS_C_IOT_ALLOW_SOURCE_RESET}"
                     -P "${AWS_C_IOT_PATCH_SCRIPT}"
             RESULT_VARIABLE AWS_C_IOT_PATCH_RESULT)
     if (NOT "${AWS_C_IOT_PATCH_RESULT}" STREQUAL "0")
