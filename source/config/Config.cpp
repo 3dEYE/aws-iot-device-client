@@ -29,6 +29,7 @@
 #include <aws/io/socket.h>
 #include <cstdlib>
 #include <iostream>
+#include <limits>
 #include <map>
 #include <regex>
 #include <stdexcept>
@@ -49,6 +50,8 @@ constexpr char PlainConfig::CLI_CERT[];
 constexpr char PlainConfig::CLI_KEY[];
 constexpr char PlainConfig::CLI_ROOT_CA[];
 constexpr char PlainConfig::CLI_THING_NAME[];
+constexpr char PlainConfig::CLI_MQTT_KEEP_ALIVE_SECONDS[];
+constexpr char PlainConfig::CLI_MQTT_PING_TIMEOUT_MS[];
 constexpr char PlainConfig::JSON_KEY_ENDPOINT[];
 constexpr char PlainConfig::JSON_KEY_CERT[];
 constexpr char PlainConfig::JSON_KEY_KEY[];
@@ -83,6 +86,46 @@ constexpr int Permissions::JOB_HANDLER;
 constexpr int Permissions::PUB_SUB_FILES;
 constexpr int Permissions::SAMPLE_SHADOW_FILES;
 constexpr int Permissions::PKCS11_LIB_FILE;
+
+namespace
+{
+    template <typename T>
+    bool ParseUnsignedCliValue(const CliArgs &cliArgs, const char *argumentName, T &target)
+    {
+        if (!cliArgs.count(argumentName))
+        {
+            return true;
+        }
+
+        const auto &valueString = cliArgs.at(argumentName);
+        try
+        {
+            size_t parsedCharacters = 0;
+            auto value = stoull(valueString, &parsedCharacters);
+            if (valueString.empty() || valueString.front() == '-' || parsedCharacters != valueString.size() ||
+                value > numeric_limits<T>::max())
+            {
+                throw out_of_range(argumentName);
+            }
+
+            target = static_cast<T>(value);
+            return true;
+        }
+        catch (const invalid_argument &)
+        {
+        }
+        catch (const out_of_range &)
+        {
+        }
+
+        LOGM_ERROR(
+            Config::TAG,
+            "*** %s: CLI argument {%s} must be a valid unsigned integer ***",
+            DeviceClient::DC_FATAL_ERROR,
+            argumentName);
+        return false;
+    }
+} // namespace
 
 bool PlainConfig::LoadFromJson(const Crt::JsonView &json)
 {
@@ -276,6 +319,11 @@ bool PlainConfig::LoadFromCliArgs(const CliArgs &cliArgs)
     {
         thingName = cliArgs.at(PlainConfig::CLI_THING_NAME).c_str();
     }
+    if (!ParseUnsignedCliValue(cliArgs, CLI_MQTT_KEEP_ALIVE_SECONDS, mqttKeepAliveSeconds) ||
+        !ParseUnsignedCliValue(cliArgs, CLI_MQTT_PING_TIMEOUT_MS, mqttPingTimeoutMs))
+    {
+        return false;
+    }
 
     bool loadFeatureCliArgs = tunneling.LoadFromCliArgs(cliArgs) && logConfig.LoadFromCliArgs(cliArgs);
 #if !defined(DISABLE_MQTT)
@@ -315,6 +363,36 @@ bool PlainConfig::LoadFromEnvironment()
 
 bool PlainConfig::Validate() const
 {
+    constexpr uint16_t MQTT_MIN_KEEP_ALIVE_SECONDS = 30;
+    constexpr uint16_t MQTT_MAX_KEEP_ALIVE_SECONDS = 1200;
+    constexpr uint32_t MQTT_DEFAULT_PING_TIMEOUT_MS = 3000;
+
+    if (mqttKeepAliveSeconds != 0 &&
+        (mqttKeepAliveSeconds < MQTT_MIN_KEEP_ALIVE_SECONDS ||
+         mqttKeepAliveSeconds > MQTT_MAX_KEEP_ALIVE_SECONDS))
+    {
+        LOGM_ERROR(
+            Config::TAG,
+            "*** %s: MQTT keep-alive must be 0 or between %u and %u seconds ***",
+            DeviceClient::DC_FATAL_ERROR,
+            static_cast<unsigned int>(MQTT_MIN_KEEP_ALIVE_SECONDS),
+            static_cast<unsigned int>(MQTT_MAX_KEEP_ALIVE_SECONDS));
+        return false;
+    }
+
+    const uint32_t effectiveKeepAliveSeconds =
+        mqttKeepAliveSeconds == 0 ? MQTT_MAX_KEEP_ALIVE_SECONDS : mqttKeepAliveSeconds;
+    const uint32_t effectivePingTimeoutMs =
+        mqttPingTimeoutMs == 0 ? MQTT_DEFAULT_PING_TIMEOUT_MS : mqttPingTimeoutMs;
+    if (effectivePingTimeoutMs >= effectiveKeepAliveSeconds * 1000)
+    {
+        LOGM_ERROR(
+            Config::TAG,
+            "*** %s: MQTT ping timeout must be shorter than the MQTT keep-alive period ***",
+            DeviceClient::DC_FATAL_ERROR);
+        return false;
+    }
+
     if (!logConfig.Validate())
     {
         return false;
@@ -2527,6 +2605,8 @@ bool Config::ParseCliArgs(int argc, char **argv, CliArgs &cliArgs)
         {PlainConfig::CLI_KEY, true, nullptr},
         {PlainConfig::CLI_ROOT_CA, true, nullptr},
         {PlainConfig::CLI_THING_NAME, true, nullptr},
+        {PlainConfig::CLI_MQTT_KEEP_ALIVE_SECONDS, true, nullptr},
+        {PlainConfig::CLI_MQTT_PING_TIMEOUT_MS, true, nullptr},
 
         {PlainConfig::LogConfig::CLI_LOG_LEVEL, true, nullptr},
         {PlainConfig::LogConfig::CLI_LOG_TYPE, true, nullptr},
@@ -2918,6 +2998,8 @@ void Config::PrintHelpMessage()
         "%s <Key-Location>:\t\t\t\t\t\t\tUse Specified Key file\n"
         "%s <Root-CA-Location>:\t\t\t\t\t\tUse Specified Root-CA file\n"
         "%s <thing-name-value/client-id-value>:\t\t\tUse Specified Thing Name (Also used as Client ID)\n"
+        "%s <seconds>:\t\t\t\t\tSet MQTT keep-alive period (30-1200 seconds; 0 uses the CRT default)\n"
+        "%s <milliseconds>:\t\t\t\tSet MQTT PINGRESP timeout (0 uses the CRT default)\n"
         "%s <Jobs-handler-directory>:\t\t\t\tUse specified directory to find job handlers\n"
         "%s <region>:\t\t\t\t\t\tUse Specified AWS Region for Secure Tunneling\n"
         "%s <service>:\t\t\t\t\t\tConnect secure tunnel to specific service\n"
@@ -2973,6 +3055,8 @@ void Config::PrintHelpMessage()
         PlainConfig::CLI_KEY,
         PlainConfig::CLI_ROOT_CA,
         PlainConfig::CLI_THING_NAME,
+        PlainConfig::CLI_MQTT_KEEP_ALIVE_SECONDS,
+        PlainConfig::CLI_MQTT_PING_TIMEOUT_MS,
         PlainConfig::Jobs::CLI_HANDLER_DIR,
         PlainConfig::Tunneling::CLI_TUNNELING_REGION,
         PlainConfig::Tunneling::CLI_TUNNELING_SERVICE,

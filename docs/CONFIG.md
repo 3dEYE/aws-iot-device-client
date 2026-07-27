@@ -32,6 +32,15 @@ field by running `aws iot describe-endpoint` on the CLI.
 
 **Note:** With a minimum configuration the Device Client by default will run with Jobs and SecureTunneling features enabled only.
 
+### MQTT liveness command-line options
+
+`--mqtt-keep-alive-seconds <seconds>` sets the MQTT keep-alive period. Accepted values are 30 through 1200 seconds. Passing
+0, or omitting the option, uses the AWS CRT default.
+
+`--mqtt-ping-timeout-ms <milliseconds>` sets how long the client waits for PINGRESP before treating the MQTT connection as
+interrupted. Passing 0, or omitting the option, uses the AWS CRT default. The timeout must be shorter than the effective
+keep-alive period.
+
 **Next**: [File and Directory Permission Requirements](PERMISSIONS.md)
 
 [*Back To The Top*](#config)

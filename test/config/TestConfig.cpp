@@ -301,7 +301,43 @@ TEST_F(ConfigTestFixture, HappyCaseMinimumCli)
     ASSERT_STREQ(filePath.c_str(), config.cert->c_str());
     ASSERT_STREQ(filePath.c_str(), config.key->c_str());
     ASSERT_STREQ("thing-name value", config.thingName->c_str());
+    ASSERT_EQ(0, config.mqttKeepAliveSeconds);
+    ASSERT_EQ(0, config.mqttPingTimeoutMs);
     AssertDefaultFeaturesEnabled(config);
+}
+
+TEST_F(ConfigTestFixture, MqttKeepAliveCliOverrides)
+{
+    auto cliArgs = makeMinimumCliArgs();
+    cliArgs[PlainConfig::CLI_MQTT_KEEP_ALIVE_SECONDS] = "30";
+    cliArgs[PlainConfig::CLI_MQTT_PING_TIMEOUT_MS] = "15000";
+
+    PlainConfig config;
+    ASSERT_TRUE(config.LoadFromCliArgs(cliArgs));
+    ASSERT_TRUE(config.Validate());
+    ASSERT_EQ(30, config.mqttKeepAliveSeconds);
+    ASSERT_EQ(15000, config.mqttPingTimeoutMs);
+}
+
+TEST_F(ConfigTestFixture, MqttKeepAliveCliRejectsInvalidValues)
+{
+    auto invalidNumberArgs = makeMinimumCliArgs();
+    invalidNumberArgs[PlainConfig::CLI_MQTT_KEEP_ALIVE_SECONDS] = "invalid";
+    PlainConfig invalidNumberConfig;
+    ASSERT_FALSE(invalidNumberConfig.LoadFromCliArgs(invalidNumberArgs));
+
+    auto shortKeepAliveArgs = makeMinimumCliArgs();
+    shortKeepAliveArgs[PlainConfig::CLI_MQTT_KEEP_ALIVE_SECONDS] = "29";
+    PlainConfig shortKeepAliveConfig;
+    ASSERT_TRUE(shortKeepAliveConfig.LoadFromCliArgs(shortKeepAliveArgs));
+    ASSERT_FALSE(shortKeepAliveConfig.Validate());
+
+    auto longPingTimeoutArgs = makeMinimumCliArgs();
+    longPingTimeoutArgs[PlainConfig::CLI_MQTT_KEEP_ALIVE_SECONDS] = "30";
+    longPingTimeoutArgs[PlainConfig::CLI_MQTT_PING_TIMEOUT_MS] = "30000";
+    PlainConfig longPingTimeoutConfig;
+    ASSERT_TRUE(longPingTimeoutConfig.LoadFromCliArgs(longPingTimeoutArgs));
+    ASSERT_FALSE(longPingTimeoutConfig.Validate());
 }
 
 TEST_F(ConfigTestFixture, ExtractExpandedPathFailureCLI)
