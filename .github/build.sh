@@ -226,7 +226,7 @@ case $compileMode in
     exit $?
     ;;
     *)
-      cmake ../ -DCMAKE_BUILD_TYPE=Release -DBUILD_SDK=OFF -DBUILD_TEST_DEPS=OFF -DLINK_DL=ON
+      cmake ../ -DCMAKE_BUILD_TYPE=Release -DBUILD_SDK=ON -DBUILD_TEST_DEPS=OFF -DLINK_DL=ON
     ;;
 esac
 

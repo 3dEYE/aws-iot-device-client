@@ -17,7 +17,7 @@ cmake ../ -DCMAKE_TOOLCHAIN_FILE=<Path/To/Build/Toolchain/File>
 This will allow the toolchain files to overwrite variables *(various paths, compilers, and flags)* required to execute cross compilation without changing the original **cmake** file.
 
 **Dependencies**:
-For your build to be successful you'll also need a cross compiled version of our dependencies ([aws-iot-device-sdk-cpp-v2](https://github.com/aws/aws-iot-device-sdk-cpp-v2) and **openssl**), for the SDK this is automatically accomplished when running the **cmake** command above without the following flag `-DBUILD_SDK=OFF`.
+For your build to be successful you'll also need cross compiled dependencies ([aws-iot-device-sdk-cpp-v2](https://github.com/aws/aws-iot-device-sdk-cpp-v2) and **openssl**). CMake always builds the pinned SDK and applies the required Device Client patches; `BUILD_SDK=OFF` is unsupported.
 ```
 cmake ../ -DCMAKE_TOOLCHAIN_FILE=<Path/To/Build/Toolchain/File>
 ```

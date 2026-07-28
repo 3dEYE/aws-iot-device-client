@@ -3,7 +3,12 @@ project(aws-iot-device-client)
 
 include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/AwsIotDeviceSdkPins.cmake")
 
-option(BUILD_SDK "Builds the aws-iot-device-sdk-cpp-v2 as part of build. Only do this if the SDK is not installed." ON)
+option(BUILD_SDK "Builds the required pinned and patched aws-iot-device-sdk-cpp-v2." ON)
+if (NOT BUILD_SDK)
+    message(FATAL_ERROR
+            "BUILD_SDK=OFF is unsupported because the Device Client "
+            "requires its bundled SDK dependency patches")
+endif ()
 option(BUILD_TEST_DEPS "Builds the device client test dependencies as part of build. Only do this if you do not have gtest installed and you wish to run the tests." ON)
 option(BUILD_AWS_C_IOT_TESTS "Builds the aws-c-iot tests from the bundled SDK source." OFF)
 option(BUILD_AWS_C_MQTT_TESTS "Builds the aws-c-mqtt tests from the bundled SDK source." OFF)
@@ -387,12 +392,6 @@ if (BUILD_SDK)
                 "${CMAKE_BINARY_DIR}/aws-c-mqtt-tests")
         set(PROJECT_NAME "${AWS_IOT_DEVICE_CLIENT_PROJECT_NAME}")
     endif ()
-else ()
-    message(WARNING
-            "BUILD_SDK=OFF uses the installed SDK as-is; "
-            "the Device Client dependency patches are not applied")
-    include_directories(/include)
-    link_directories(/lib)
 endif ()
 
 ###############################################

@@ -153,7 +153,7 @@ run_native() {
     ctest \
         --test-dir "${build_dir}/aws-c-mqtt-tests" \
         --output-on-failure \
-        --tests-regex '^mqtt_connection_sub_timeout$' \
+        --tests-regex '^mqtt_connection_(sub_timeout|resubscribe_timeout)$' \
         --timeout 60 \
         --no-tests=error
 

@@ -3,7 +3,7 @@
 
 + [Advanced Compilation](#advanced-compilation)
     - [Build and Install All Dependencies via CMake](#build-and-install-all-dependencies-via-cmake)
-    - [Build With Dependencies Already Installed](#build-with-dependencies-already-installed)
+    - [Build With Test Dependencies Already Installed](#build-with-test-dependencies-already-installed)
     - [Building a Release Candidate](#building-a-release-candidate)
     - [Custom Compilation - Exclude Specific IoT Features to Reduce Executable Footprint](#custom-compilation---exclude-specific-iot-features-to-reduce-executable-footprint)
     - [Cross Compiliation - Building from one architecture to the other](../cmake-toolchain/README.md)
@@ -34,31 +34,27 @@ cmake --build . --target aws-iot-device-client
 cmake --build . --target test-aws-iot-device-client # This line builds the test executable
 ```
 
-### Build With Dependencies Already Installed
+### Build With Test Dependencies Already Installed
 
 **Description**:  
-Use this build method for building the device client with dependencies already installed. This build option may be
-applicable if you already have the aws-iot-device-sdk-cpp-v2 installed on your device.
+The Device Client always builds its pinned aws-iot-device-sdk-cpp-v2 source and applies the required dependency patches.
+`BUILD_SDK=OFF` is unsupported. If googletest is already installed, CMake can skip building the test dependencies.
 
-* The Device Client requires that the [aws-iot-device-sdk-cpp-v2](https://github.com/aws/aws-iot-device-sdk-cpp-v2) 
-  is installed.
 * The Device Client tests require that [googletest](https://github.com/google/googletest) is installed.
 
-Options (These options can be passed to :
-* BUILD_SDK: This CMake flag is set to `ON` by default, which will enable CMake to pull and build the 
-  aws-iot-device-sdk-cpp-v2
-* BUILD_TEST_DEPS: This CMake flag is set to `ON` by default, will enable CMake to pull and build googletest
+Options:
+* BUILD_TEST_DEPS: This CMake flag is set to `ON` by default and enables CMake to pull and build googletest.
 
-Use the following `cmake` commands to build the AWS IoT Device Client with already existing and installed dependencies.
+Use the following `cmake` commands to build the AWS IoT Device Client with an existing googletest installation.
 These commands should be run with `aws-iot-device-client` (the contents of this repository) in a folder called
-`aws-iot-device-client` in your current working directory
+`aws-iot-device-client` in your current working directory.
 
 ```
 git clone https://github.com/awslabs/aws-iot-device-client
 cd aws-iot-device-client
 mkdir build
 cd build
-cmake ../ -DBUILD_SDK=OFF -DBUILD_TEST_DEPS=OFF
+cmake ../ -DBUILD_TEST_DEPS=OFF
 cmake --build . --target aws-iot-device-client
 cmake --build . --target test-aws-iot-device-client # This line builds the test executable
 ```
