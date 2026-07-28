@@ -144,8 +144,100 @@ class SummarizeTestResultsTest(unittest.TestCase):
             summary = summary_path.read_text(encoding="utf-8")
             self.assertIn("| Device Client | 2 | 2 | 0 | 1 |", summary)
             self.assertIn(
-                "| IoT Device Defender C++ | 2 | 2 | 0 | 1 |",
+                (
+                    "| Eventstream RPC + Device Defender C++ "
+                    "| 2 | 2 | 0 | 1 |"
+                ),
                 summary,
+            )
+
+    def test_main_marks_every_unavailable_result_and_returns_nonzero(self):
+        unavailable_junit = {
+            "aws-c-iot.xml": "<testsuite>",
+            "aws-c-mqtt.xml": "<testsuite/>",
+            "iot-device-defender-cpp.xml": """\
+<testsuite>
+  <testcase name="disabled" status="notrun"><skipped/></testcase>
+</testsuite>
+""",
+        }
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            results_dir = root / "results"
+            badge_dir = root / "badges"
+            summary_path = root / "summary.md"
+            results_dir.mkdir()
+            for junit_file, contents in unavailable_junit.items():
+                (results_dir / junit_file).write_text(
+                    contents,
+                    encoding="utf-8",
+                )
+
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            with mock.patch.dict(
+                os.environ,
+                {"GITHUB_STEP_SUMMARY": str(summary_path)},
+            ):
+                with (
+                    contextlib.redirect_stdout(stdout),
+                    contextlib.redirect_stderr(stderr),
+                ):
+                    result = summarize_test_results.main(
+                        [
+                            "--results-dir",
+                            str(results_dir),
+                            "--badge-dir",
+                            str(badge_dir),
+                        ]
+                    )
+
+            self.assertEqual(result, 1)
+            self.assertEqual(
+                {path.name for path in badge_dir.glob("*.json")},
+                {group.badge_file for group in summarize_test_results.TEST_GROUPS},
+            )
+            for group in summarize_test_results.TEST_GROUPS:
+                payload = json.loads(
+                    (badge_dir / group.badge_file).read_text(encoding="utf-8")
+                )
+                self.assertEqual(
+                    payload,
+                    {
+                        "schemaVersion": 1,
+                        "label": group.label,
+                        "message": "results unavailable",
+                        "color": "red",
+                    },
+                )
+
+            summary = summary_path.read_text(encoding="utf-8")
+            self.assertEqual(stdout.getvalue(), summary)
+            for group in summarize_test_results.TEST_GROUPS:
+                self.assertIn(
+                    f"| {group.label} | N/A | N/A | N/A | N/A |",
+                    summary,
+                )
+
+            errors = stderr.getvalue()
+            self.assertIn(
+                "Device Client: results unavailable:",
+                errors,
+            )
+            self.assertIn(
+                "aws-c-iot: results unavailable:",
+                errors,
+            )
+            self.assertIn(
+                "aws-c-mqtt: results unavailable:",
+                errors,
+            )
+            self.assertIn(
+                (
+                    "Eventstream RPC + Device Defender C++: "
+                    "results unavailable:"
+                ),
+                errors,
             )
 
 

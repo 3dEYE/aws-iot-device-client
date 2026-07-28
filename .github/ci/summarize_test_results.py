@@ -7,6 +7,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 import xml.etree.ElementTree as ElementTree
@@ -32,7 +33,7 @@ TEST_GROUPS = (
     TestGroup("aws-c-iot", "aws-c-iot.xml", "aws-c-iot.json"),
     TestGroup("aws-c-mqtt", "aws-c-mqtt.xml", "aws-c-mqtt.json"),
     TestGroup(
-        "IoT Device Defender C++",
+        "Eventstream RPC + Device Defender C++",
         "iot-device-defender-cpp.xml",
         "iot-device-defender-cpp.json",
     ),
@@ -89,7 +90,18 @@ def read_counts(junit_path: Path) -> TestCounts:
     )
 
 
-def badge_payload(group: TestGroup, counts: TestCounts) -> dict[str, object]:
+def badge_payload(
+    group: TestGroup,
+    counts: TestCounts | None,
+) -> dict[str, object]:
+    if counts is None:
+        return {
+            "schemaVersion": 1,
+            "label": group.label,
+            "message": "results unavailable",
+            "color": "red",
+        }
+
     return {
         "schemaVersion": 1,
         "label": group.label,
@@ -98,20 +110,23 @@ def badge_payload(group: TestGroup, counts: TestCounts) -> dict[str, object]:
     }
 
 
-def markdown_summary(results: list[tuple[TestGroup, TestCounts]]) -> str:
+def markdown_summary(
+    results: list[tuple[TestGroup, TestCounts | None]],
+) -> str:
     lines = [
         "### Native test totals",
         "",
         "| Group | Ran | Passed | Failed | Skipped |",
         "| --- | ---: | ---: | ---: | ---: |",
     ]
-    lines.extend(
-        (
-            f"| {group.label} | {counts.ran} | {counts.passed} | "
-            f"{counts.failed} | {counts.skipped} |"
-        )
-        for group, counts in results
-    )
+    for group, counts in results:
+        if counts is None:
+            lines.append(f"| {group.label} | N/A | N/A | N/A | N/A |")
+        else:
+            lines.append(
+                f"| {group.label} | {counts.ran} | {counts.passed} | "
+                f"{counts.failed} | {counts.skipped} |"
+            )
     return "\n".join(lines) + "\n"
 
 
@@ -127,8 +142,19 @@ def main(argv: list[str] | None = None) -> int:
     args.badge_dir.mkdir(parents=True, exist_ok=True)
 
     results = []
+    unavailable_results = False
     for group in TEST_GROUPS:
-        counts = read_counts(args.results_dir / group.junit_file)
+        junit_path = args.results_dir / group.junit_file
+        try:
+            counts = read_counts(junit_path)
+        except (OSError, ElementTree.ParseError, ValueError) as error:
+            counts = None
+            unavailable_results = True
+            print(
+                f"{group.label}: results unavailable: {error}",
+                file=sys.stderr,
+            )
+
         results.append((group, counts))
         badge_path = args.badge_dir / group.badge_file
         badge_path.write_text(
@@ -144,7 +170,7 @@ def main(argv: list[str] | None = None) -> int:
         with Path(summary_path).open("a", encoding="utf-8") as summary_file:
             summary_file.write(summary)
 
-    return 0
+    return 1 if unavailable_results else 0
 
 
 if __name__ == "__main__":

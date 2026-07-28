@@ -5,7 +5,7 @@
 [![Device Client tests](https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2F3dEYE%2Faws-iot-device-client%2Fbadges%2Fbadges%2Fdevice-client.json)](https://github.com/3dEYE/aws-iot-device-client/actions/workflows/pull-request.yml)
 [![aws-c-iot tests](https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2F3dEYE%2Faws-iot-device-client%2Fbadges%2Fbadges%2Faws-c-iot.json)](https://github.com/3dEYE/aws-iot-device-client/actions/workflows/pull-request.yml)
 [![aws-c-mqtt tests](https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2F3dEYE%2Faws-iot-device-client%2Fbadges%2Fbadges%2Faws-c-mqtt.json)](https://github.com/3dEYE/aws-iot-device-client/actions/workflows/pull-request.yml)
-[![IoT Device Defender C++ tests](https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2F3dEYE%2Faws-iot-device-client%2Fbadges%2Fbadges%2Fiot-device-defender-cpp.json)](https://github.com/3dEYE/aws-iot-device-client/actions/workflows/pull-request.yml)
+[![Eventstream RPC + Device Defender C++ tests](https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2F3dEYE%2Faws-iot-device-client%2Fbadges%2Fbadges%2Fiot-device-defender-cpp.json)](https://github.com/3dEYE/aws-iot-device-client/actions/workflows/pull-request.yml)
 
  **Notice:** Running the AWS IoT Device Client will incur usage of AWS IoT services, and is likely to incur charges on your AWS account. Please refer the pricing pages for [AWS IoT Core](https://aws.amazon.com/iot-core/pricing/), [AWS IoT Device Management](https://aws.amazon.com/iot-device-management/pricing/), and [AWS IoT Device Defender](https://aws.amazon.com/iot-device-defender/pricing/) for more details.
 

@@ -129,13 +129,41 @@ jobs:
           "${{ matrix.mode }}"
           Release
 
+      - name: Finalize x64 test badge data
+        if: >-
+          ${{
+            !cancelled() &&
+            matrix.architecture == 'x64' &&
+            matrix.mode == 'native'
+          }}
+        shell: bash
+        run: |
+          badge_dir="build/x64/test-results/badges"
+          badge_files=(
+            device-client.json
+            aws-c-iot.json
+            aws-c-mqtt.json
+            iot-device-defender-cpp.json
+          )
+          for badge_file in "${badge_files[@]}"; do
+            if [[ ! -s "${badge_dir}/${badge_file}" ]]; then
+              python3 .github/ci/summarize_test_results.py \
+                --results-dir build/x64/test-results \
+                --badge-dir "$badge_dir"
+              break
+            fi
+          done
+
       - name: Upload x64 test badge data
         if: >-
-          github.event_name == 'push' &&
-          github.ref == 'refs/heads/dev' &&
-          github.repository == '3dEYE/aws-iot-device-client' &&
-          matrix.architecture == 'x64' &&
-          matrix.mode == 'native'
+          ${{
+            !cancelled() &&
+            github.event_name == 'push' &&
+            github.ref == 'refs/heads/dev' &&
+            github.repository == '3dEYE/aws-iot-device-client' &&
+            matrix.architecture == 'x64' &&
+            matrix.mode == 'native'
+          }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
           name: dev-test-badges-x64
@@ -146,9 +174,12 @@ jobs:
   publish-test-badges:
     name: Publish test badges
     if: >-
-      github.event_name == 'push' &&
-      github.ref == 'refs/heads/dev' &&
-      github.repository == '3dEYE/aws-iot-device-client'
+      ${{
+        !cancelled() &&
+        github.event_name == 'push' &&
+        github.ref == 'refs/heads/dev' &&
+        github.repository == '3dEYE/aws-iot-device-client'
+      }}
     needs: build-and-test
     runs-on: ubuntu-22.04
     permissions:
