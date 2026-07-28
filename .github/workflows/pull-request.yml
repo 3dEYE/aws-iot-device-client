@@ -53,10 +53,12 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Test release version derivation
+      - name: Test CI helpers
         if: matrix.architecture == 'x64' && matrix.mode == 'native'
         shell: bash
-        run: bash .github/ci/test-versioning.sh
+        run: |
+          bash .github/ci/test-versioning.sh
+          python3 -B .github/ci/test_summarize_test_results.py
 
       - name: Read pinned SDK revision
         id: sdk-pin
@@ -126,3 +128,102 @@ jobs:
           "${{ matrix.architecture }}"
           "${{ matrix.mode }}"
           Release
+
+      - name: Upload x64 test badge data
+        if: >-
+          github.event_name == 'push' &&
+          github.ref == 'refs/heads/dev' &&
+          github.repository == '3dEYE/aws-iot-device-client' &&
+          matrix.architecture == 'x64' &&
+          matrix.mode == 'native'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: dev-test-badges-x64
+          path: build/x64/test-results/badges
+          if-no-files-found: error
+          retention-days: 1
+
+  publish-test-badges:
+    name: Publish test badges
+    if: >-
+      github.event_name == 'push' &&
+      github.ref == 'refs/heads/dev' &&
+      github.repository == '3dEYE/aws-iot-device-client'
+    needs: build-and-test
+    runs-on: ubuntu-22.04
+    permissions:
+      actions: read
+      contents: write
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Download x64 test badge data
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: dev-test-badges-x64
+          path: ${{ runner.temp }}/test-badge-data
+
+      - name: Publish test badge data
+        shell: bash
+        env:
+          BADGE_BRANCH: badges
+        run: |
+          set -euo pipefail
+
+          badge_files=(
+            device-client.json
+            aws-c-iot.json
+            aws-c-mqtt.json
+            iot-device-defender-cpp.json
+          )
+          for badge_file in "${badge_files[@]}"; do
+            if [[ ! -s "${RUNNER_TEMP}/test-badge-data/${badge_file}" ]]; then
+              echo "Missing badge data: ${badge_file}" >&2
+              exit 1
+            fi
+            python3 -m json.tool \
+              "${RUNNER_TEMP}/test-badge-data/${badge_file}" \
+              >/dev/null
+          done
+
+          remote_dev="$(
+            git ls-remote origin refs/heads/dev |
+              awk 'NR == 1 { print $1 }'
+          )"
+          if [[ "$remote_dev" != "$GITHUB_SHA" ]]; then
+            echo "Skipping stale badge data for ${GITHUB_SHA}."
+            exit 0
+          fi
+
+          if git ls-remote --exit-code --heads origin "$BADGE_BRANCH" \
+              >/dev/null; then
+            git fetch origin "$BADGE_BRANCH"
+            git switch --force-create "$BADGE_BRANCH" FETCH_HEAD
+          else
+            git switch --orphan "$BADGE_BRANCH"
+          fi
+
+          mkdir -p badges
+          for badge_file in "${badge_files[@]}"; do
+            cp \
+              "${RUNNER_TEMP}/test-badge-data/${badge_file}" \
+              "badges/${badge_file}"
+          done
+
+          git add badges
+          if git diff --cached --quiet; then
+            echo "Test badge data is unchanged."
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config \
+            user.email \
+            "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "Update test badges for ${GITHUB_SHA:0:12}"
+          git push origin "HEAD:refs/heads/${BADGE_BRANCH}"

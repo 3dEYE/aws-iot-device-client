@@ -120,6 +120,8 @@ run_native() {
     local build_name="$1"
     local build_type="$2"
     local build_dir="${repo_root}/build/${build_name}"
+    local test_results_dir="${build_dir}/test-results"
+    local badge_dir="${test_results_dir}/badges"
     local sdk_source_dir
 
     sdk_source_dir="$(prepare_sdk_source "$build_dir")"
@@ -140,14 +142,28 @@ run_native() {
             IotDeviceDefender-cpp-tests \
         --parallel 2
 
+    mkdir -p "$badge_dir"
+    rm -f -- \
+        "${test_results_dir}/device-client.xml" \
+        "${test_results_dir}/aws-c-iot.xml" \
+        "${test_results_dir}/aws-c-mqtt.xml" \
+        "${test_results_dir}/iot-device-defender-cpp.xml" \
+        "${badge_dir}/device-client.json" \
+        "${badge_dir}/aws-c-iot.json" \
+        "${badge_dir}/aws-c-mqtt.json" \
+        "${badge_dir}/iot-device-defender-cpp.json"
+
     AWS_CRT_MEMORY_TRACING=1 \
-        "${build_dir}/test/test-aws-iot-device-client" --gtest_brief=1
+        "${build_dir}/test/test-aws-iot-device-client" \
+        --gtest_brief=1 \
+        --gtest_output="xml:${test_results_dir}/device-client.xml"
 
     ctest \
         --test-dir "${build_dir}/aws-c-iot-tests" \
         --output-on-failure \
         --parallel 2 \
         --timeout 60 \
+        --output-junit "${test_results_dir}/aws-c-iot.xml" \
         --no-tests=error
 
     ctest \
@@ -155,6 +171,7 @@ run_native() {
         --output-on-failure \
         --tests-regex '^mqtt_connection_(sub_timeout|resubscribe_timeout)$' \
         --timeout 60 \
+        --output-junit "${test_results_dir}/aws-c-mqtt.xml" \
         --no-tests=error
 
     ctest \
@@ -162,7 +179,12 @@ run_native() {
         --output-on-failure \
         --parallel 2 \
         --timeout 60 \
+        --output-junit "${test_results_dir}/iot-device-defender-cpp.xml" \
         --no-tests=error
+
+    python3 "${repo_root}/.github/ci/summarize_test_results.py" \
+        --results-dir "$test_results_dir" \
+        --badge-dir "$badge_dir"
 }
 
 prepare_cross_openssl() {
